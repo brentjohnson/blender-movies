@@ -1,0 +1,21 @@
+# Everything below is regenerated from the scripts (build -> bake -> render -> encode).
+
+# Blender scene files and their autosave backups
+*.blend
+*.blend1
+*.blend@
+
+# Simulation caches and render outputs
+cache/
+frames/
+output/
+tests/
+waveletNoiseTile.bin
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Throwaway scaffolds
+zz*-movie/
