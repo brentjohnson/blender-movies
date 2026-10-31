@@ -28,8 +28,8 @@ TUCK = 0.04                           # feet pull up under him in the air, m
 CLIP_BEFORE = 0.07                    # body this far short of the bar when the right foot catches it
 CLIP_POP = 1.2                        # m/s upward kick from the bar as he trips over it
 VX_TRIP = 1.8                         # m/s forward while tumbling
-HEAD_SQUASH = 1 / 3                   # height at the bottom of the head splat
-HEAD_T = (0.09, 0.05, 0.09)           # s: squash down, hold, spring back up
+HEAD_SQUASH = 1 / 3                   # height at the bottom of the head splat (done by the smoosh deformer)
+HEAD_T = (0.08, 0.08, 0.15)           # s: squash down, hold (with a jiggle), ooze back up
 VZ_REBOUND = 2.4                      # m/s up off his head
 VX_REBOUND = 0.45                     # m/s forward on the rebound
 STAND_END = 1.8                       # s on his feet at the end
@@ -194,7 +194,7 @@ def plan(fps, leg_x, leg_y, height):
             feet.append((fx, fy, fz, fh + math.pi / 2))
 
         out.append(dict(mode="gait", x=f["x"], y=f["y"], z=z, yaw=f["h"] + math.pi / 2, pitch=pitch,
-                        roll=roll, sway=sway, squash=1 + sq, feet=feet))
+                        roll=roll, sway=sway, squash=1 + sq, feet=feet, smoosh=0.0))
 
     # ---- pass 3: the trip. Straight line along the takeoff heading, phase by phase.
     last = frames[-1]
@@ -228,6 +228,7 @@ def plan(fps, leg_x, leg_y, height):
         tt = k / fps
         hold_w = 0.0
         roll = 0.0
+        smoosh = 0.0
         if tt < t_clip:                             # rising into the hop, legs tucking
             d = V_RUN * tt
             cz = C + v0 * tt - 0.5 * G * tt * tt
@@ -255,14 +256,17 @@ def plan(fps, leg_x, leg_y, height):
                 u = tau / down
                 sq_abs = 1 - (1 - HEAD_SQUASH) * (1 - (1 - u) ** 2)
             elif tau < down + hold:
-                sq_abs = HEAD_SQUASH
+                jig = 0.06 * math.sin(math.pi * (tau - down) / hold * 2)   # a quick jelly jiggle while flat
+                sq_abs = HEAD_SQUASH + (1 - HEAD_SQUASH) * abs(jig)
             else:
                 sq_abs = HEAD_SQUASH + (1 - HEAD_SQUASH) * smooth(0.0, 1.0, (tau - down - hold) / up)
-            sq, sq_v = sq_abs - 1, 0.0
+            # the body stays rigid; the smoosh deformer squashes him from the floor contact outward
+            smoosh = (1 - sq_abs) / (1 - HEAD_SQUASH)
+            sq, sq_v = 0.0, 0.0
             anchor, contact = height, "head"
         elif tt < t_feet:                           # rebound: up and over the second half of the flip
             tau = tt - t_launch
-            if sq_v == 0.0 and abs(sq) < 1e-6:
+            if tt - 1.0 / fps < t_launch:
                 sq_v = 1.8                          # leaves his head with a stretch
             d = d_launch + VX_REBOUND * tau
             cz = (height - C) + VZ_REBOUND * tau - 0.5 * G * tau * tau
@@ -283,7 +287,7 @@ def plan(fps, leg_x, leg_y, height):
             sq, sq_v = spring(sq, sq_v, 0.0, 1.0 / fps)
         out.append(dict(mode="tumble", x=x0 + ux * d, y=y0 + uy * d, z=cz - C, cz=cz, C=C,
                         yaw=h + math.pi / 2, theta=theta, roll=roll, squash=1 + sq, anchor=anchor,
-                        contact=contact, tuck=tuck, hold_w=hold_w))
+                        contact=contact, tuck=tuck, hold_w=hold_w, smoosh=smoosh))
 
     t0 = last["t"]
     return dict(frames=out, hurdle=hurdle, t_takeoff=t0, t_clip=t0 + t_clip, t_head=t0 + t_head,

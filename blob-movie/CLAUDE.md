@@ -67,17 +67,24 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   speed up through a 90° turn into a 1.5 m/s run, and try to hop a 0.24 m hurdle. The hop is too low
   (`TRIP_LIFT` 0.15), so his right foot catches the bar at the top of it. The foot sticks briefly, the bar
   pops him up (`CLIP_POP`), and he rotates forward exactly π by the time his head reaches the floor. There he
-  squashes about the top of his head to 1/3 height (×1.74 wider, volume kept), holds, springs back up, finishes
+  smooshes out from the floor contact to 1/3 height, jiggles, oozes back up, finishes
   the flip in the air, lands on his feet with a jelly splat, and does a dizzy wobble. The hurdle rocks forward
   and rattles back down.
   Gait frames: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs
   to the next plant. The body bobs, sways, leans and banks; banking lifts him so the wide base never cuts the floor.
   Tumble frames: rigid rotation `theta` about the body's middle, squash anchored at head, middle or feet, and the
-  legs ride the body (plus tuck). A floor probe of rest vertices keeps him exactly on the floor during contacts
+  legs ride the body (plus tuck).
+  Smoosh (head splat): a uniform bone scale looked stiff, so a world-space GN deformer ("Smoosh" group) runs
+  after the rig on the body and on the eyes, mouth and flakes. A slice at u = z/H moves to H·(a·u + b·u²), with
+  a=0.12 and a+b=1/3, and spreads from the contact point by 1/√(a + 2b·u) to keep its volume. The floor slice puddles
+  ~2.9× while the far end stays domed. It's driven by the keyed "Smoosh" empty: location = contact,
+  scale.x − 1 = amount, scale.y = H. The GN reads its own object's world transform (Self Object → Object Info),
+  so bone-parented objects deform consistently with the body. A floor probe of rest vertices keeps him exactly on the floor during contacts
   and above it in the air.
   Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles), all
   pointing up, so an affine M = rigid @ squash-along-up never needs shear: `matrix_basis = rest⁻¹ @ M @ rest`.
-  Leg weights fade into the body by z=0.11, so the jelly stretches between planted feet and the body. Eyes,
+  The whole lower base is weighted to the legs (split left/right with a soft seam; a radius around each leg
+  axis left the outer corners on the body, hanging like a fixed skirt), fading into the body by z=0.11. Eyes,
   mouth and flakes are bone-parented to `body` and squash with it.
   Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
   Lights: the same rig (plus the back spot, widened to 70°) scaled 1.6× around the course, with a wider key.

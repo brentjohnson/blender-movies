@@ -473,14 +473,15 @@ if ANIM == "walk":
         eb.head, eb.tail = (sd * LEG_X, LEG_Y, 0), (sd * LEG_X, LEG_Y, 0.12)
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    # Skin weights: leg bones own the bottom of each leg, fading into the body by LEG_TOP.
+    # Skin weights: the whole lower base belongs to the legs, fading into the body by LEG_TOP. It's split
+    # left/right with a soft seam down the middle. (A radius around each leg axis left the base's outer
+    # corners on the body, so they hung down like a fixed skirt while the feet stepped.)
     LEG_TOP = 0.11
     groups = {n: body.vertex_groups.new(name=n) for n in ("body", "leg.R", "leg.L")}
     for v in me.vertices:
-        ws = {}
-        for name, sd in LEGS:
-            d = (v.co.xy - Vector((sd * LEG_X, LEG_Y))).length
-            ws[name] = (1 - smoothstep(0.015, LEG_TOP, v.co.z)) * (1 - smoothstep(0.06, 0.13, d))
+        low = 1 - smoothstep(0.015, LEG_TOP, v.co.z)
+        left = smoothstep(-0.035, 0.035, v.co.x)
+        ws = {"leg.R": low * (1 - left), "leg.L": low * left}
         ws["body"] = max(0.0, 1.0 - sum(ws.values()))
         for name, w in ws.items():
             if w > 1e-4:
@@ -498,6 +499,51 @@ if ANIM == "walk":
     for o in [o for o in scene.objects if o.name.startswith(("Eye", "Pupil", "Mouth"))] + [flake_obj]:
         o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "body"
         o.matrix_parent_inverse = bone_rest.inverted()
+
+    # Smoosh: a world-space squash measured from the floor, applied after the rig to the body and to
+    # everything riding on it (eyes, mouth, flakes), so they all deform together. A slice at height z (u = z/H)
+    # moves to H*(a*u + b*u^2), with a + b = HEAD_SQUASH. Its local vertical compression a + 2*b*u is strongest at
+    # the floor, and it spreads out from the contact point by 1/sqrt(compression) to keep its volume. The floor
+    # slice puddles out (~2.9x) and the far end stays domed (~1.35x). Controlled by the "Smoosh" empty:
+    # location = contact point, scale.x - 1 = amount (0..1), scale.y = H.
+    SM_A = 0.12
+    SM_B = walk.HEAD_SQUASH - SM_A
+    smoosh_ctrl = link(bpy.data.objects.new("Smoosh", None))
+    smoosh_ctrl.scale = (1.0, height, 1.0)
+    sg = bpy.data.node_groups.new("Smoosh", 'GeometryNodeTree')
+    sg.interface.new_socket("Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+    sg.interface.new_socket("Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    g = NT(sg)
+    gin = g("NodeGroupInput")
+    me_info = g("GeometryNodeObjectInfo", transform_space='ORIGINAL', Object=g("GeometryNodeSelfObject").outputs[0])
+    ctl = g("GeometryNodeObjectInfo", transform_space='ORIGINAL', Object=smoosh_ctrl)
+    wp = g("FunctionNodeTransformPoint", Vector=g("GeometryNodeInputPosition").outputs[0],
+           Transform=me_info.outputs["Transform"])
+    p_ = g("ShaderNodeSeparateXYZ", Vector=wp.outputs[0])
+    c_ = g("ShaderNodeSeparateXYZ", Vector=ctl.outputs["Location"])
+    k_ = g("ShaderNodeSeparateXYZ", Vector=ctl.outputs["Scale"])
+    amount = g.math('SUBTRACT', k_.outputs["X"], 1.0)
+    H = k_.outputs["Y"]
+    u = g.math('DIVIDE', p_.outputs["Z"], H, clamp=True)
+    f = g.math('MULTIPLY', g.math('MULTIPLY', g.math('MULTIPLY_ADD', u, SM_B, SM_A), u), H)   # H*u*(a + b*u)
+    z_new = g.math('MULTIPLY_ADD', g.math('SUBTRACT', f, g.math('MULTIPLY', u, H)), amount, p_.outputs["Z"])
+    comp = g.math('MULTIPLY_ADD', g.math('SUBTRACT', g.math('MULTIPLY_ADD', u, 2 * SM_B, SM_A), 1.0), amount, 1.0)
+    spread = g.math('POWER', comp, -0.5)
+    x_new = g.math('MULTIPLY_ADD', g.math('SUBTRACT', p_.outputs["X"], c_.outputs["X"]), spread, c_.outputs["X"])
+    y_new = g.math('MULTIPLY_ADD', g.math('SUBTRACT', p_.outputs["Y"], c_.outputs["Y"]), spread, c_.outputs["Y"])
+    comb = g("ShaderNodeCombineXYZ", X=x_new, Y=y_new, Z=z_new)
+    inv = g("FunctionNodeInvertMatrix", Matrix=me_info.outputs["Transform"])
+    lp = g("FunctionNodeTransformPoint", Vector=comb.outputs[0], Transform=inv.outputs[0])
+    setp = g("GeometryNodeSetPosition", Geometry=gin.outputs[0], Position=lp.outputs[0])
+    g.link(setp.outputs[0], g("NodeGroupOutput").inputs[0])
+    # body: armature -> smoosh -> smoothing
+    body.modifiers.remove(sm)
+    body.modifiers.new("smoosh", 'NODES').node_group = sg
+    sm = body.modifiers.new("smooth", 'CORRECTIVE_SMOOTH')
+    sm.iterations = 6
+    sm.use_only_smooth = True
+    for o in [o for o in scene.objects if o.name.startswith(("Eye", "Pupil", "Mouth"))] + [flake_obj]:
+        o.modifiers.new("smoosh", 'NODES').node_group = sg
 
     # Bake the plan into per-frame keys. Every bone gets an affine world transform M applied to its rest
     # geometry: matrix_basis = rest^-1 @ M @ rest. M is rigid times a volume-keeping squash along the body's
@@ -523,6 +569,10 @@ if ANIM == "walk":
     hold = None
     for i, f in enumerate(PLAN["frames"]):
         fr = F0 + i
+        smoosh_ctrl.location = (f["x"], f["y"], 0.0)
+        smoosh_ctrl.scale = (1.0 + f["smoosh"], height, 1.0)
+        smoosh_ctrl.keyframe_insert("location", frame=fr)
+        smoosh_ctrl.keyframe_insert("scale", frame=fr)
         if f["mode"] == "gait":
             W = (Matrix.Translation((f["x"], f["y"], f["z"])) @ Matrix.Rotation(f["yaw"], 4, 'Z')
                  @ Matrix.Translation((f["sway"], 0, 0))
