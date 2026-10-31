@@ -9,6 +9,7 @@ It's a refractive shell around a green absorbing/scattering volume, with sparkle
 Front of the character faces -Y. Units are meters; he's about 0.55 m tall.
 """
 import bpy
+import bmesh
 import math
 import os
 import random
@@ -191,9 +192,10 @@ def axis_rot(direction):
 ball('BALL', (0, 0, 0.34), 0.30)
 ball('ELLIPSOID', (0, 0, 0.18), 0.34, size=(1.05, 0.95, 0.75))
 # stubby arms, angled out and a bit down
+ARM_C, ARM_DIR = (0.22, -0.01, 0.23), (1, -0.15, -0.55)    # right arm mirrors x
 for s in (-1, 1):
-    ball('CAPSULE', (s * 0.22, -0.01, 0.23), 0.085, size=(0.045, 1, 1),
-         rot=axis_rot((s, -0.15, -0.55)))
+    ball('CAPSULE', (s * ARM_C[0], ARM_C[1], ARM_C[2]), 0.085, size=(0.045, 1, 1),
+         rot=axis_rot((s * ARM_DIR[0], ARM_DIR[1], ARM_DIR[2])))
 # short cylindrical legs: vertical capsules here; their round bottoms are flattened after meshing
 LEG_X = float(os.environ.get("LEG_X", "0.105"))       # leg axis offset from the centre line, m
 LEG_Y = -0.02
@@ -215,12 +217,39 @@ for v in me.vertices:
     v.co.z -= zmin
 
 
+def voxel_remesh(me, size):
+    """Even, clean topology (the metaball mesh is dense and uneven, and stretches poorly)."""
+    tmp = bpy.data.objects.new("_remesh", me)
+    scene.collection.objects.link(tmp)
+    rm = tmp.modifiers.new("remesh", 'REMESH')
+    rm.mode = 'VOXEL'
+    rm.voxel_size = size
+    out = bpy.data.meshes.new_from_object(tmp.evaluated_get(bpy.context.evaluated_depsgraph_get()))
+    bpy.data.objects.remove(tmp)
+    return out
+
+
+def mirror_right_to_left(me):
+    """Make him exactly symmetric: keep his right half (-X) and mirror it onto his left."""
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bmesh.ops.symmetrize(bm, input=bm.verts[:] + bm.edges[:] + bm.faces[:], direction='-X', dist=1e-5)
+    bm.to_mesh(me)
+    bm.free()
+
+
+me = voxel_remesh(me, float(os.environ.get("VOXEL", "0.005")))
+
+
 def flatten_soles(me):
     """Turn each leg's round bottom into a flat sole with a soft, filleted edge.
 
     Below the hemisphere centre, every vertex moves along its ray from that centre, from the sphere out
     onto a rounded-cylinder profile (flat bottom, quarter-circle fillet, vertical side). Straight-down and
-    sideways rays keep their length, so the sole stays at the floor and the side joins smoothly."""
+    sideways rays keep their length, so the sole stays at the floor and the side joins smoothly.
+    The left pass also reworks his right side (the measured radius spans the whole base), and that double
+    pass is what gives the chosen merged-base look. It leaves his left side lopsided, so mirror_right_to_left()
+    then copies the right half over it."""
     for s in (-1, 1):
         axis = Vector((s * LEG_X, LEG_Y))
         near = [v for v in me.vertices if (v.co.xy - axis).length < LEG_R * 2.5]
@@ -247,16 +276,15 @@ def flatten_soles(me):
             new_r = rv.normalized() * dr * k if dr > 1e-9 else rv
             v.co.x, v.co.y = (axis + new_r)
             v.co.z = cz + dz * k
-    # The measured "leg radius" spans the whole merged base (~0.26 m), which gives the chosen look, but the
-    # second leg's pass pushes a few hundred already-moved vertices on his left below the floor. They sit
-    # inside the footprint, so lifting them onto the sole plane just completes the flat sole. Unlifted, they
-    # stayed hidden under the floor while standing, but floated him 7 cm up whenever he left the ground.
+    # The measured "leg radius" spans the whole merged base (~0.26 m), which gives the chosen look. Anything
+    # pushed below the floor sits inside the footprint, so lifting it onto the sole plane completes the sole.
     for v in me.vertices:
         if v.co.z < 0:
             v.co.z = 0.0
 
 
 flatten_soles(me)
+mirror_right_to_left(me)
 for p in me.polygons:
     p.use_smooth = True
 me.materials.append(M_BODY)
@@ -312,6 +340,7 @@ mouth = link(bpy.data.objects.new("Mouth", cu))
 mouth.shape_key_add(name="Basis")
 frown = mouth.shape_key_add(name="Frown", from_mix=False)
 frown.slider_min = -0.6
+frown.value = 0.0                 # new curve shape keys start at 1.0
 for i in range(N):
     t = i / (N - 1) * 2 - 1
     loc, nrm = surface_point(t * 0.05, mouth_z - 0.010 + 0.014 * (1 - t * t))
@@ -467,8 +496,9 @@ def smoothstep(e0, e1, x):
 
 
 if ANIM == "walk":
-    # Three bones, none parented: the body, and one per leg standing on its sole. The legs are free, so a
-    # planted foot stays put while the body moves on, and the jelly between them stretches.
+    # Bones, none parented: the body, one per leg standing on its sole, a chest above the body for
+    # follow-through, and one per arm. The legs are free, so a planted foot stays put while the body moves on,
+    # and the jelly between them stretches. Chest and arms are keyed relative to the body (see below).
     arm = bpy.data.armatures.new("Rig")
     rig = link(bpy.data.objects.new("Rig", arm))
     bpy.context.view_layer.objects.active = rig
@@ -479,18 +509,40 @@ if ANIM == "walk":
     for name, sd in LEGS:
         eb = arm.edit_bones.new(name)
         eb.head, eb.tail = (sd * LEG_X, LEG_Y, 0), (sd * LEG_X, LEG_Y, 0.12)
+    CHEST_Z = 0.12
+    eb = arm.edit_bones.new("chest")
+    eb.head, eb.tail = (0, 0, CHEST_Z), (0, 0, CHEST_Z + 0.33)
+    ARMS = (("arm.R", -1), ("arm.L", 1))
+    arm_axis = {}
+    for name, sd in ARMS:
+        d = Vector((sd * ARM_DIR[0], ARM_DIR[1], ARM_DIR[2])).normalized()
+        c = Vector((sd * ARM_C[0], ARM_C[1], ARM_C[2] - zmin))
+        shoulder, hand = c - d * 0.07, c + d * 0.08
+        arm_axis[name] = (shoulder, d, (hand - shoulder).length)
+        eb = arm.edit_bones.new(name)
+        eb.head, eb.tail = shoulder, hand
     bpy.ops.object.mode_set(mode='OBJECT')
 
     # Skin weights: the whole lower base belongs to the legs, fading into the body by LEG_TOP. It's split
     # left/right with a soft seam down the middle. (A radius around each leg axis left the base's outer
     # corners on the body, so they hung down like a fixed skirt while the feet stepped.)
+    # Each arm owns the stub along its axis, fading in from the shoulder. What's left goes to the chest
+    # above CHEST_LO..CHEST_HI and to the body below.
     LEG_TOP = 0.11
-    groups = {n: body.vertex_groups.new(name=n) for n in ("body", "leg.R", "leg.L")}
+    CHEST_LO, CHEST_HI = 0.14, 0.24
+    groups = {n: body.vertex_groups.new(name=n) for n in ("body", "chest", "leg.R", "leg.L", "arm.R", "arm.L")}
     for v in me.vertices:
         low = 1 - smoothstep(0.015, LEG_TOP, v.co.z)
         left = smoothstep(-0.035, 0.035, v.co.x)
         ws = {"leg.R": low * (1 - left), "leg.L": low * left}
-        ws["body"] = max(0.0, 1.0 - sum(ws.values()))
+        for name, (sh, d, ln) in arm_axis.items():
+            rel = v.co - sh
+            t = rel.dot(d) / ln
+            r = (rel - d * rel.dot(d)).length
+            ws[name] = smoothstep(0.15, 0.6, t) * (1 - smoothstep(0.07, 0.11, r))
+        rest_w = max(0.0, 1.0 - sum(ws.values()))
+        ws["chest"] = rest_w * smoothstep(CHEST_LO, CHEST_HI, v.co.z)
+        ws["body"] = rest_w - ws["chest"]
         for name, w in ws.items():
             if w > 1e-4:
                 groups[name].add([v.index], w, 'REPLACE')
@@ -501,9 +553,9 @@ if ANIM == "walk":
     sm.iterations = 6
     sm.use_only_smooth = True
 
-    # Mouth and flakes ride on the body bone. The eyes are keyed in world space (below), because they leave
+    # Mouth and flakes ride on the chest bone. The eyes are keyed in world space (below), because they leave
     # him; each pupil is parented to its eyeball so it rolls with it.
-    bb = arm.bones["body"]
+    bb = arm.bones["chest"]
     bone_rest = rig.matrix_world @ bb.matrix_local @ Matrix.Translation((0, bb.length, 0))
     EYES = sorted([o for o in scene.objects if o.name.startswith("Eye")], key=lambda o: o.location.x)
     PUPILS = sorted([o for o in scene.objects if o.name.startswith("Pupil")], key=lambda o: o.location.x)
@@ -511,7 +563,7 @@ if ANIM == "walk":
         pupil.parent = eye
         pupil.matrix_parent_inverse = eye.matrix_world.inverted()
     for o in [o for o in scene.objects if o.name.startswith("Mouth")] + [flake_obj]:
-        o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "body"
+        o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "chest"
         o.matrix_parent_inverse = bone_rest.inverted()
 
     # Smoosh: a world-space squash measured from the floor, applied after the rig to the body and to
@@ -561,7 +613,10 @@ if ANIM == "walk":
 
     # Bake the plan into per-frame keys. Every bone gets an affine world transform M applied to its rest
     # geometry: matrix_basis = rest^-1 @ M @ rest. M is rigid times a volume-keeping squash along the body's
-    # up axis about some anchor height. All three bones point up in rest, so this never needs shear.
+    # up axis about some anchor height. Body, chest and legs point up in rest, so this never needs shear.
+    # The chest is the body tilted in world space about the chest root by the planner's lag spring. The arms
+    # can't take the squash (they point sideways, so it would need shear): each one is rigid, turned by the
+    # chest's rotation and its swing/raise angles about the shoulder, which rides the squashed chest.
     def keyframe(pb, M, fr):
         rest = pb.bone.matrix_local
         pb.matrix_basis = rest.inverted() @ M @ rest
@@ -581,7 +636,24 @@ if ANIM == "walk":
                   if any(g.group == body_gi and g.weight > 0.98 for g in v.groups)]
     piv = Matrix.Translation((0, 0, walk.PIVOT))
     hold = None
-    body_M = []                                 # body bone's world transform per frame, for the eyes
+    body_M = []                                 # chest bone's world transform per frame, for the eyes
+
+    def key_upper(M, f, fr):
+        """Key the chest and arms from the body transform M; return the chest's transform."""
+        p = M @ Vector((0, 0, CHEST_Z))
+        lx, ly = f["lag"]
+        R = Matrix.Rotation(lx, 4, 'Y') @ Matrix.Rotation(-ly, 4, 'X')
+        MC = Matrix.Translation(p) @ R @ Matrix.Translation(-p) @ M
+        keyframe(rig.pose.bones["chest"], MC, fr)
+        rc = MC.to_3x3().normalized().to_4x4()
+        for name, sd in ARMS:
+            sh = arm_axis[name][0]
+            side = "R" if sd < 0 else "L"
+            Rl = (Matrix.Rotation(f["swing_" + side], 4, 'X')
+                  @ Matrix.Rotation(-sd * (f["abd_" + side] - 0.12), 4, 'Y'))
+            keyframe(rig.pose.bones[name], Matrix.Translation(MC @ sh) @ rc @ Rl @ Matrix.Translation(-sh), fr)
+        return MC
+
     for i, f in enumerate(PLAN["frames"]):
         fr = F0 + i
         smoosh_ctrl.location = (f["x"], f["y"], 0.0)
@@ -598,7 +670,7 @@ if ANIM == "walk":
             if low < 0:                             # banking/leaning swings the wide base down: lift him
                 M = Matrix.Translation((0, 0, -low)) @ M
             keyframe(rig.pose.bones["body"], M, fr)
-            body_M.append(M)
+            body_M.append(key_upper(M, f, fr))
             for (name, sd), (fx, fy, fz, fyaw) in zip(LEGS, f["feet"]):
                 W = (Matrix.Translation((fx, fy, fz)) @ Matrix.Rotation(fyaw, 4, 'Z')
                      @ Matrix.Translation((-sd * LEG_X, -LEG_Y, 0)))
@@ -613,7 +685,7 @@ if ANIM == "walk":
         if f["contact"] or low < 0:                 # touching the floor exactly, never through it
             M = Matrix.Translation((0, 0, -low)) @ M
         keyframe(rig.pose.bones["body"], M, fr)
-        body_M.append(M)
+        body_M.append(key_upper(M, f, fr))
         for name, sd in LEGS:
             ML = M @ Matrix.Translation((0, 0, f["tuck"]))
             if name == "leg.R" and f["hold_w"] > 0:  # the foot that clipped the bar lags behind

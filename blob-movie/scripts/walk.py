@@ -314,9 +314,100 @@ def plan(fps, leg_x, leg_y, height):
 
     t0 = last["t"]
     eyes = [{k: t0 + v for k, v in e.items()} for e in eyes]
+    T = dict(to=t0, clip=t0 + t_clip, head=t0 + t_head, launch=t0 + t_launch, feet=t0 + t_feet,
+             frown=t0 + t_feet + FROWN_DELAY, smile=max(e["t_done"] for e in eyes))
+    secondary(out, fps, leg_y, T)
     return dict(frames=out, hurdle=hurdle, t_takeoff=t0, t_clip=t0 + t_clip, t_head=t0 + t_head,
                 t_feet=t0 + t_feet, eyes=eyes, t_frown=t0 + t_feet + FROWN_DELAY,
                 t_smile=max(e["t_done"] for e in eyes), start=START, h0=H0)
+
+
+def secondary(out, fps, leg_y, T):
+    """Add arm angles and the chest's follow-through to every frame (in place).
+
+    Arms: "swing_R/L" rotates about his left-right axis (positive swings the arm back), "abd_R/L" raises it
+    out to the side. They swing opposite the feet when walking, go back for the crouch and forward for the
+    hop, flail in the trip, splay on the splat, droop while he's eyeless, and go up in a cheer when his eyes
+    are back. A springy follower smooths the targets so the arms lag and overshoot a little.
+    Chest: "lag" is a world-space tilt (x, y) of the upper body, a spring driven by his horizontal
+    acceleration: it lags when he speeds up and swings forward when he stops. It's off while he tumbles."""
+    dt = 1.0 / fps
+    tgt = []
+    for i, f in enumerate(out):
+        t = i * dt
+        sw = [0.0, 0.0]
+        ab = [0.12, 0.12]
+        if f["mode"] == "gait":
+            h = f["yaw"] - math.pi / 2
+            fx, fy = math.cos(h), math.sin(h)
+            run = smooth(0.6, 1.3, math.hypot(*(
+                (out[min(i + 1, len(out) - 1)][c] - out[max(i - 1, 0)][c]) * fps / 2 for c in ("x", "y"))))
+            for k in range(2):
+                foot = f["feet"][k]
+                rel = (foot[0] - f["x"]) * fx + (foot[1] - f["y"]) * fy + leg_y   # + forward of rest spot
+                sw[k] = clamp(4.5 * rel, -0.7, 0.7)
+                ab[k] = 0.12 + 0.25 * run
+            w = smooth(T["to"] - 0.25, T["to"] - 0.08, t)          # wind up: arms back for the hop
+            sw = [lerp(v, 0.6, w) for v in sw]
+            ab = [lerp(v, 0.3, w) for v in ab]
+        elif t < T["clip"]:                                           # hop: reach forward
+            sw, ab = [-0.9, -0.9], [0.5, 0.5]
+        elif t < T["head"]:                                           # trip: flail
+            tau = t - T["clip"]
+            sw = [0.6 * math.sin(2 * math.pi * 5 * tau + k * math.pi) for k in range(2)]
+            ab = [1.1 + 0.25 * math.sin(2 * math.pi * 5 * tau + k * 1.3) for k in range(2)]
+        elif t < T["launch"]:                                         # splat: splayed out flat
+            sw, ab = [0.0, 0.0], [1.4, 1.4]
+        elif t < T["feet"]:                                           # rebound
+            u = (t - T["launch"]) / max(T["feet"] - T["launch"], 1e-6)
+            sw = [0.3 * math.sin(2 * math.pi * 3 * u + k * math.pi) for k in range(2)]
+            ab = [lerp(1.1, 0.6, u)] * 2
+        else:
+            tau = t - T["feet"]
+            a = 0.15 + 0.45 * math.exp(-tau / 0.25) * math.cos(2 * math.pi * 2.5 * tau)
+            droop = smooth(T["frown"], T["frown"] + 0.3, t) * (1 - smooth(T["smile"] - 0.1, T["smile"], t))
+            cheer = smooth(T["smile"], T["smile"] + 0.15, t) * (1 - smooth(T["smile"] + 0.7, T["smile"] + 1.1, t))
+            a = lerp(a, 0.04, droop)
+            sw = [lerp(0.0, 0.18, droop)] * 2
+            wig = 0.15 * math.sin(2 * math.pi * 4 * (t - T["smile"]))
+            ab = [lerp(a, 1.5 + wig * (1 if k else -1), cheer) for k in range(2)]
+            sw = [lerp(v, -0.3, cheer) for v in sw]
+        tgt.append((sw, ab))
+
+    # springy follower on all four arm angles
+    wn, zeta = 2 * math.pi * 3.0, 0.55
+    state = [[tgt[0][0][k], 0.0] for k in range(2)] + [[tgt[0][1][k], 0.0] for k in range(2)]
+    for i, f in enumerate(out):
+        goals = tgt[i][0] + tgt[i][1]
+        for j in range(4):
+            x, v = state[j]
+            for _ in range(10):
+                h = dt / 10
+                v += (-wn * wn * (x - goals[j]) - 2 * zeta * wn * v) * h
+                x += v * h
+            state[j] = [x, v]
+        f["swing_R"], f["swing_L"], f["abd_R"], f["abd_L"] = (state[j][0] for j in range(4))
+
+    # chest follow-through
+    wn, zeta, gain, cap = 2 * math.pi * 2.2, 0.3, 7.0, 0.15
+    th = [0.0, 0.0]
+    om = [0.0, 0.0]
+    acc = [0.0, 0.0]
+    n = len(out)
+    for i, f in enumerate(out):
+        t = i * dt
+        a_raw = [(out[min(i + 1, n - 1)][c] - 2 * f[c] + out[max(i - 1, 0)][c]) * fps * fps for c in ("x", "y")]
+        on = 1.0 if f["mode"] == "gait" else smooth(T["feet"], T["feet"] + 0.15, t)
+        for k in range(2):
+            acc[k] += (a_raw[k] * on - acc[k]) * 0.3
+            for _ in range(10):
+                h = dt / 10
+                om[k] += (-wn * wn * th[k] - 2 * zeta * wn * om[k] - gain * acc[k]) * h
+                th[k] += om[k] * h
+        m = math.hypot(*th)
+        if m > cap:
+            th = [c * cap / m for c in th]
+        f["lag"] = (th[0] * on, th[1] * on)
 
 
 def spring(x, v, target, dt, sub=10):

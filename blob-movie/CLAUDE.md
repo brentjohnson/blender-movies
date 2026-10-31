@@ -30,13 +30,16 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
 
 - `build_scene.py` env overrides: `ANIM` (idle | walk), `ABSORB` (volume density, 11.0), `GREEN_SHADOW` (1), `SHADOW_TINT` (1.0), `BACK_W` (1500), `SCATTER` (0.8), `SKIN_ROUGH` (0.12),
   `FLAKE_COUNT` (900), `FLAKE_SIZE` (0.004, hex radius), `DRIFT` (0.0125 m/s), `TUMBLE` (0.5 rad/s),
-  `FRAMES` (240 at 24 fps; walk sets its own length), `LEG_R` (0.12), `LEG_X` (0.105), `LEG_Z` (0.03), `LEG_FILLET` (0.35), `FLAKE_ROUGH` (0.04, min of a 0.04–0.16 per-flake spread), `SAMPLES` (128), `RES_PCT`, `EXPOSURE` (−0.6).
+  `FRAMES` (240 at 24 fps; walk sets its own length), `LEG_R` (0.12), `LEG_X` (0.105), `LEG_Z` (0.03), `LEG_FILLET` (0.35), `VOXEL` (0.005, remesh voxel size), `FLAKE_ROUGH` (0.04, min of a 0.04–0.16 per-flake spread), `SAMPLES` (128), `RES_PCT`, `EXPOSURE` (−0.6).
 - No Blender simulations, so there is nothing to bake. The flake drift is simulated in `build_scene.py` (~7 s).
 
 ## Scene notes
 
 - **Body.** A metaball field (body + stubby arms/feet melt into one surface), converted to a mesh with
-  `bpy.data.meshes.new_from_object(obj.evaluated_get(depsgraph))`. Front faces −Y.
+  `bpy.data.meshes.new_from_object(obj.evaluated_get(depsgraph))`. Front faces −Y. The mesh is then voxel
+  remeshed (`VOXEL`; even topology, ~44k verts), soles are flattened, and his right half (−X) is mirrored
+  onto the left with `bmesh.ops.symmetrize`. The result is exactly symmetric (max mirror error 0). The metaball
+  polygonizer and the two sole passes had left the sides slightly different.
 - **Legs.** Short cylinders with flat soles and soft edges. They start as fat vertical capsule metaballs that merge
   well into the body (a metaball's visible radius is much smaller than its element radius). After meshing,
   `flatten_soles()` moves each lower-hemisphere vertex along its ray from the hemisphere centre onto a
@@ -88,17 +91,27 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   scale.x − 1 = amount, scale.y = H. The GN reads its own object's world transform (Self Object → Object Info),
   so bone-parented objects deform consistently with the body.
   Eyes: not bone-parented; keyed in world space every frame (pupils parented to their eyeballs). They ride
-  the body (`body_M[i] @ rest`) until the splat, then a small sim handles the pop, bounces (restitution 0.45) and
+  the chest (`body_M[i] @ rest`, now the chest's transform) until the splat, then a small sim handles the pop, bounces (restitution 0.45) and
   rolling (rotation = distance / 0.044 m, damped to a stop). They roll back on a Bezier that approaches from
   in front of him, then follow a body-local path: in through the skin, up through the jelly, slerping to
   forward, and out with ease-out-back and a scale bulge. They don't get the smoosh. Timings are in walk.py
   (`EYE_*`). A floor probe of rest vertices keeps him exactly on the floor during contacts
   and above it in the air.
-  Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles), all
-  pointing up, so an affine M = rigid @ squash-along-up never needs shear: `matrix_basis = rest⁻¹ @ M @ rest`.
+  Rig: parentless bones, all keyed in world space with `matrix_basis = rest⁻¹ @ M @ rest`. `body` (pivot z=0.06)
+  and `leg.R`/`leg.L` (standing on the soles) point up, so an affine M = rigid @ squash-along-up never needs shear.
+  `chest` (z 0.12–0.45) is the body tilted in world space about its root by the planner's `lag`, a spring
+  (2.2 Hz, ζ 0.3, ≤0.15 rad) driven by his horizontal acceleration. It lags when he speeds up and sways forward
+  when he stops; it's off during the tumble. `arm.R`/`arm.L` run along the arm stubs. They point sideways, so
+  they can't take the squash without shear. Instead each is rigid: the chest's rotation, then
+  `swing` (about his X, + = back) and `abd` (raise out to the side) about the shoulder, which rides the
+  squashed chest. walk.py `secondary()` plans the arm angles: opposite the feet when walking, back for the
+  wind-up, forward on the hop, flailing in the trip, splayed on the splat, drooping while he's eyeless, a cheer
+  when his eyes are back. A 3 Hz springy follower adds lag and overshoot.
+  Weights: legs as below; each arm owns its stub (fading in along the axis from the shoulder, within 0.11 m of
+  it); the rest is chest above z 0.14–0.24 and body below.
   The whole lower base is weighted to the legs (split left/right with a soft seam; a radius around each leg
-  axis left the outer corners on the body, hanging like a fixed skirt), fading into the body by z=0.11. Eyes,
-  mouth and flakes are bone-parented to `body` and squash with it.
+  axis left the outer corners on the body, hanging like a fixed skirt), fading into the body by z=0.11. Mouth
+  and flakes are bone-parented to `chest`, and the eyes ride the chest's transform.
   Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
   Lights: the same rig (plus the back spot, widened to 70°) scaled 1.6× around the course, with a wider key.
   Lights are hidden from the camera.
