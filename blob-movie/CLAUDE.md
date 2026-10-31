@@ -68,7 +68,12 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   (`TRIP_LIFT` 0.15), so his right foot catches the bar at the top of it. The foot sticks briefly, the bar
   pops him up (`CLIP_POP`), and he rotates forward exactly π by the time his head reaches the floor. There he
   smooshes out from the floor contact to 1/3 height, jiggles, oozes back up, finishes
-  the flip in the air, lands on his feet with a jelly splat, and does a dizzy wobble. The hurdle rocks forward
+  the flip in the air, lands on his feet with a jelly splat, and does a dizzy wobble. His eyes pop out on the
+  splat and roll away. Once he's standing they roll back, sink into the front of his base, float up through
+  him and pop out into their sockets, with a body "gulp" and jiggle for each. He frowns when he notices
+  they're gone (`FROWN_DELAY`) and grins when the second one pops in. The face is a "Frown" shape key on
+  the mouth curve; negative values give a bigger grin. After he lands, the camera swings round past him
+  (ease-out-back) to a 3/4 front view and aims at his face (`CAM_DELAY`, `CAM_MOVE`). The hurdle rocks forward
   and rattles back down.
   Gait frames: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs
   to the next plant. The body bobs, sways, leans and banks; banking lifts him so the wide base never cuts the floor.
@@ -79,7 +84,13 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   a=0.12 and a+b=1/3, and spreads from the contact point by 1/√(a + 2b·u) to keep its volume. The floor slice puddles
   ~2.9× while the far end stays domed. It's driven by the keyed "Smoosh" empty: location = contact,
   scale.x − 1 = amount, scale.y = H. The GN reads its own object's world transform (Self Object → Object Info),
-  so bone-parented objects deform consistently with the body. A floor probe of rest vertices keeps him exactly on the floor during contacts
+  so bone-parented objects deform consistently with the body.
+  Eyes: not bone-parented; keyed in world space every frame (pupils parented to their eyeballs). They ride
+  the body (`body_M[i] @ rest`) until the splat, then a small sim handles the pop, bounces (restitution 0.45) and
+  rolling (rotation = distance / 0.044 m, damped to a stop). They roll back on a Bezier that approaches from
+  in front of him, then follow a body-local path: in through the skin, up through the jelly, slerping to
+  forward, and out with ease-out-back and a scale bulge. They don't get the smoosh. Timings are in walk.py
+  (`EYE_*`). A floor probe of rest vertices keeps him exactly on the floor during contacts
   and above it in the air.
   Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles), all
   pointing up, so an affine M = rigid @ squash-along-up never needs shear: `matrix_basis = rest⁻¹ @ M @ rest`.

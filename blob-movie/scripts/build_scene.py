@@ -307,7 +307,15 @@ for i in range(N):
     loc, nrm = surface_point(t * 0.05, mouth_z - 0.018 * (1 - t * t))
     spl.points[i].co = (*(loc - nrm * 0.002), 1)
 cu.materials.append(M_MOUTH)
-link(bpy.data.objects.new("Mouth", cu))
+mouth = link(bpy.data.objects.new("Mouth", cu))
+# "Frown" shape key: the curve flips (ends down, middle up). Pushing it negative gives a bigger grin.
+mouth.shape_key_add(name="Basis")
+frown = mouth.shape_key_add(name="Frown", from_mix=False)
+frown.slider_min = -0.6
+for i in range(N):
+    t = i / (N - 1) * 2 - 1
+    loc, nrm = surface_point(t * 0.05, mouth_z - 0.010 + 0.014 * (1 - t * t))
+    frown.data[i].co = loc - nrm * 0.002
 
 
 # --------------------------------------------------------------------------- sparkles inside
@@ -493,10 +501,16 @@ if ANIM == "walk":
     sm.iterations = 6
     sm.use_only_smooth = True
 
-    # Eyes, mouth and flakes ride on the body bone.
+    # Mouth and flakes ride on the body bone. The eyes are keyed in world space (below), because they leave
+    # him; each pupil is parented to its eyeball so it rolls with it.
     bb = arm.bones["body"]
     bone_rest = rig.matrix_world @ bb.matrix_local @ Matrix.Translation((0, bb.length, 0))
-    for o in [o for o in scene.objects if o.name.startswith(("Eye", "Pupil", "Mouth"))] + [flake_obj]:
+    EYES = sorted([o for o in scene.objects if o.name.startswith("Eye")], key=lambda o: o.location.x)
+    PUPILS = sorted([o for o in scene.objects if o.name.startswith("Pupil")], key=lambda o: o.location.x)
+    for eye, pupil in zip(EYES, PUPILS):        # right eye (-X) first
+        pupil.parent = eye
+        pupil.matrix_parent_inverse = eye.matrix_world.inverted()
+    for o in [o for o in scene.objects if o.name.startswith("Mouth")] + [flake_obj]:
         o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "body"
         o.matrix_parent_inverse = bone_rest.inverted()
 
@@ -542,7 +556,7 @@ if ANIM == "walk":
     sm = body.modifiers.new("smooth", 'CORRECTIVE_SMOOTH')
     sm.iterations = 6
     sm.use_only_smooth = True
-    for o in [o for o in scene.objects if o.name.startswith(("Eye", "Pupil", "Mouth"))] + [flake_obj]:
+    for o in [o for o in scene.objects if o.name.startswith("Mouth")] + [flake_obj]:
         o.modifiers.new("smoosh", 'NODES').node_group = sg
 
     # Bake the plan into per-frame keys. Every bone gets an affine world transform M applied to its rest
@@ -567,6 +581,7 @@ if ANIM == "walk":
                   if any(g.group == body_gi and g.weight > 0.98 for g in v.groups)]
     piv = Matrix.Translation((0, 0, walk.PIVOT))
     hold = None
+    body_M = []                                 # body bone's world transform per frame, for the eyes
     for i, f in enumerate(PLAN["frames"]):
         fr = F0 + i
         smoosh_ctrl.location = (f["x"], f["y"], 0.0)
@@ -583,6 +598,7 @@ if ANIM == "walk":
             if low < 0:                             # banking/leaning swings the wide base down: lift him
                 M = Matrix.Translation((0, 0, -low)) @ M
             keyframe(rig.pose.bones["body"], M, fr)
+            body_M.append(M)
             for (name, sd), (fx, fy, fz, fyaw) in zip(LEGS, f["feet"]):
                 W = (Matrix.Translation((fx, fy, fz)) @ Matrix.Rotation(fyaw, 4, 'Z')
                      @ Matrix.Translation((-sd * LEG_X, -LEG_Y, 0)))
@@ -597,6 +613,7 @@ if ANIM == "walk":
         if f["contact"] or low < 0:                 # touching the floor exactly, never through it
             M = Matrix.Translation((0, 0, -low)) @ M
         keyframe(rig.pose.bones["body"], M, fr)
+        body_M.append(M)
         for name, sd in LEGS:
             ML = M @ Matrix.Translation((0, 0, f["tuck"]))
             if name == "leg.R" and f["hold_w"] > 0:  # the foot that clipped the bar lags behind
@@ -605,6 +622,130 @@ if ANIM == "walk":
                     hold = sole.copy()
                 ML = Matrix.Translation((hold - sole) * f["hold_w"]) @ ML
             keyframe(rig.pose.bones[name], ML, fr)
+
+    # The eyes. They ride the body until the head splat, then pop out, bounce and roll to a stop. A while
+    # after he's back on his feet, each one rolls back (approaching from in front so it doesn't pass through
+    # his base), pushes in through the front of his base, floats up through the jelly turning to face
+    # forward, and pops out into its socket. Keys are world loc/rot/scale every frame.
+    fps = scene.render.fps
+    G = 9.81
+    R_EYE = 0.044                               # rolling radius
+
+    def ease(x):
+        x = min(max(x, 0.0), 1.0)
+        return x * x * (3 - 2 * x)
+
+    def ease_out_back(x):
+        c1 = 1.70158
+        return 1 + (c1 + 1) * (x - 1) ** 3 + c1 * (x - 1) ** 2
+
+    def bezier(p0, p1, p2, s):
+        return p0 * (1 - s) ** 2 + p1 * 2 * s * (1 - s) + p2 * s * s
+
+    def rot_of(M):
+        return M.to_3x3().normalized().to_quaternion()
+
+    def roll(q, disp):
+        """Turn q as if rolling along the floor by disp (no slipping)."""
+        if disp.length < 1e-9:
+            return q
+        axis = Vector((0, 0, 1)).cross(Vector((disp.x, disp.y, 0)))
+        return Quaternion(axis.normalized(), disp.length / R_EYE) @ q
+
+    nF = len(PLAN["frames"])
+    for k, (eye, tm) in enumerate(zip(EYES, PLAN["eyes"])):
+        side = -1 if k == 0 else 1
+        rest = eye.matrix_world.copy()
+        e_loc, _, e_scale = rest.decompose()
+        eye.parent = None
+        eye.matrix_basis = rest
+        eye.rotation_mode = 'QUATERNION'
+        i_eject, i_ret, i_abs, i_flt, i_pop, i_done = (int(round(tm[n] * fps)) for n in
+                                                      ("t_eject", "t_return", "t_absorb", "t_float", "t_pop", "t_done"))
+        # where it touches his base, in body (rest) coordinates: front of the base, just off centre
+        front_y = min(v.co.y for v in me.vertices
+                      if abs(v.co.x - side * 0.07) < 0.025 and abs(v.co.z - R_EYE) < 0.025)
+        L_touch = Vector((side * 0.07, front_y - R_EYE * 0.6, R_EYE))
+        L_in = Vector((side * 0.06, front_y + 0.09, 0.09))
+        out_dir = Vector((e_loc.x * 0.6, -1.0, 0.15)).normalized()
+        L_sock = e_loc - out_dir * 0.06             # just behind the socket, inside him
+
+        # free flight + rolling, simulated from the splat until it's called back
+        M0 = body_M[i_eject] @ rest
+        p, q, _ = M0.decompose()
+        centre = body_M[i_eject] @ Vector((0, 0, height / 2))
+        away = Vector((p.x - centre.x, p.y - centre.y, 0))
+        away = away.normalized() if away.length > 1e-6 else Vector((0, -1, 0))
+        d = (away * 0.35 + Vector((0.3 + 0.35 * side, -1.3, 0))).normalized()   # mostly toward the camera
+        v = d * (0.6 + 0.1 * k)
+        v.z = 0.7
+        spin = Vector((0.3 * side, 1.0, 0.25)).normalized() * 10.0
+        free = {}
+        sub = 10
+        dt = 1.0 / (fps * sub)
+        for i in range(i_eject, i_ret + 1):
+            free[i] = (p.copy(), q.copy())
+            for _ in range(sub):
+                v.z -= G * dt
+                p += v * dt
+                grounded = False
+                if p.z <= R_EYE:
+                    p.z = R_EYE
+                    v.z = -v.z * 0.45 if v.z < -0.25 else 0.0
+                    grounded = v.z == 0.0
+                if grounded:                        # rolling, slowing to a stop
+                    damp = math.exp(-dt / 0.6)
+                    v.x *= damp
+                    v.y *= damp
+                    q = roll(q, Vector((v.x, v.y, 0)) * dt)
+                else:
+                    q = Quaternion(spin.normalized(), spin.length * dt) @ q
+        p_rest, q = free[i_ret]
+
+        prev = None
+        for i in range(nF):
+            M = body_M[i]
+            scale = e_scale
+            if i < i_eject or i >= i_done:          # in his head
+                loc, rq, scale = (M @ rest).decompose()
+            elif i <= i_ret:
+                loc, rq = free[i]
+            elif i < i_abs:                         # rolling back to him
+                T = M @ L_touch
+                T.z = R_EYE
+                fwd = rot_of(M) @ Vector((0, -1, 0))
+                fwd.z = 0
+                P1 = T + fwd.normalized() * 0.3
+                P1.z = R_EYE
+                s0 = ease((i - 1 - i_ret) / (i_abs - i_ret))
+                s1 = ease((i - i_ret) / (i_abs - i_ret))
+                a, b = bezier(p_rest, P1, T, s0), bezier(p_rest, P1, T, s1)
+                q = roll(q, b - a)
+                loc, rq = b, q
+                if i == i_abs - 1:
+                    q_local0 = rot_of(M).inverted() @ q
+            else:                                   # in through the skin, up through the jelly, out
+                if i < i_flt:
+                    L = L_touch.lerp(L_in, ease((i - i_abs) / max(i_flt - i_abs, 1)))
+                    ql = q_local0
+                elif i < i_pop:
+                    u = (i - i_flt) / max(i_pop - i_flt, 1)
+                    ctrl = Vector((L_in.x, (L_in.y + L_sock.y) / 2 + 0.03, (L_in.z + L_sock.z) / 2))
+                    L = bezier(L_in, ctrl, L_sock, ease(u))
+                    L.x += 0.012 * math.sin(2 * math.pi * 1.5 * u) * (1 - u)   # a little wobble on the way up
+                    ql = q_local0.slerp(Quaternion(), ease(u))
+                else:
+                    u = (i - i_pop) / max(i_done - i_pop, 1)
+                    L = L_sock.lerp(e_loc, ease_out_back(u))
+                    ql = Quaternion()
+                    scale = e_scale * (1 + 0.18 * math.sin(math.pi * u))     # pops out with a bulge
+                loc, rq = M @ L, rot_of(M) @ ql
+            if prev is not None and prev.dot(rq) < 0:
+                rq = -rq
+            prev = rq.copy()
+            eye.matrix_basis = Matrix.LocRotScale(loc, rq, scale)
+            for path in ("location", "rotation_quaternion", "scale"):
+                eye.keyframe_insert(path, frame=F0 + i)
 
     # the hurdle: two white posts on little feet and a red bar, square across his path. It hangs from an
     # empty on the front edge of its feet, so when he clips it, it rocks forward and rattles back down.
@@ -729,18 +870,50 @@ tt.track_axis = 'TRACK_NEGATIVE_Z'
 tt.up_axis = 'UP_Y'
 scene.camera = cam
 if ANIM == "walk":
-    # the aim follows him with operator-style lag; the camera trucks sideways after it, lagging more
+    # The aim follows him with operator-style lag; the camera trucks sideways after it, lagging more.
+    # After he lands, the camera swings round past him (overshooting a little) to a 3/4 front view, looking
+    # back at his face, and the aim moves up to his face.
     cam_data.lens = 55
     cam_data.dof.aperture_fstop = 5.6
+    fps = scene.render.fps
+    t_orbit = PLAN["t_feet"] + walk.CAM_DELAY
+    end = PLAN["frames"][-1]
+    hub = Vector((end["x"], end["y"], 0.0))
+    face = hub + Vector((0, 0, 0.36))
+    front = end["yaw"] - math.pi / 2                # his heading
     a = c = None
+    orbit0 = None
     for i, f in enumerate(PLAN["frames"]):
+        t = i / fps
         want = Vector((f["x"], f["y"], 0.27 + 0.6 * f["z"]))
         a = want if a is None else a + (want - a) * 0.2
         cwant = Vector((0.2 + 0.85 * a.x, -3.4, 0.5))
         c = cwant if c is None else c + (cwant - c) * 0.08
-        aim.location, cam.location = a, c
+        aim_loc, cam_loc = a, c
+        if t >= t_orbit:
+            if orbit0 is None:
+                rel = c - hub
+                orbit0 = (math.atan2(rel.y, rel.x), rel.xy.length, c.z, a.copy())
+            ang0, r0, z0, a0 = orbit0
+            u = min((t - t_orbit) / walk.CAM_MOVE, 1.0)
+            e = u * u * (3 - 2 * u)
+            c1 = 1.70158                            # ease-out-back: sweeps a little past, then settles
+            eb = 1 + (c1 + 1) * (e - 1) ** 3 + c1 * (e - 1) ** 2
+            ang1 = front - math.radians(35)         # 3/4 front, on the camera's side
+            ang = ang0 + (ang1 - ang0) * eb
+            r = r0 + (2.4 - r0) * e
+            cam_loc = hub + Vector((math.cos(ang) * r, math.sin(ang) * r, z0 + (0.42 - z0) * e))
+            aim_loc = a0.lerp(face, e)
+        aim.location, cam.location = aim_loc, cam_loc
         aim.keyframe_insert("location", frame=F0 + i)
         cam.keyframe_insert("location", frame=F0 + i)
+
+    # Face: he frowns when he realises his eyes are gone, and grins when they're back.
+    kb = mouth.data.shape_keys.key_blocks["Frown"]
+    for t, val in ((PLAN["t_frown"], 0.0), (PLAN["t_frown"] + 0.25, 1.0), (PLAN["t_smile"], 1.0),
+                   (PLAN["t_smile"] + 0.15, -0.5), (PLAN["t_smile"] + 0.7, 0.0)):
+        kb.value = val
+        kb.keyframe_insert("value", frame=F0 + int(round(t * fps)))
 
 
 # --------------------------------------------------------------------------- render settings

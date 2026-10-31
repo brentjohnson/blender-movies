@@ -32,7 +32,18 @@ HEAD_SQUASH = 1 / 3                   # height at the bottom of the head splat (
 HEAD_T = (0.08, 0.08, 0.15)           # s: squash down, hold (with a jiggle), ooze back up
 VZ_REBOUND = 2.4                      # m/s up off his head
 VX_REBOUND = 0.45                     # m/s forward on the rebound
-STAND_END = 1.8                       # s on his feet at the end
+# His eyes pop out on the head splat, roll away, and after he's back on his feet they roll back, sink into
+# his base, float up through him and pop out into their sockets. The eye motion itself is built in
+# build_scene.py; these are the timings (seconds), shared so the body can react.
+EYE_RETURN_DELAY = 0.9                # after landing on his feet
+EYE_ROLL_BACK = 1.4
+EYE_ABSORB = 0.35                     # pushing in through the skin
+EYE_FLOAT = 1.3                       # rising through the jelly
+EYE_POP = 0.18
+EYE_STAGGER = 0.2                     # the left eye trails the right
+FROWN_DELAY = 0.8                     # after landing: he notices his eyes are gone
+CAM_DELAY, CAM_MOVE = 0.2, 2.4        # after landing: the camera swings round past him to see his face
+STAND_END = EYE_RETURN_DELAY + EYE_ROLL_BACK + EYE_STAGGER + EYE_ABSORB + EYE_FLOAT + EYE_POP + 1.2
 PIVOT = 0.06                          # body bone head: lean and squash happen about this height
 
 SPRING_W = 2 * math.pi * 4.0          # jelly wobble: 4 Hz
@@ -221,6 +232,15 @@ def plan(fps, leg_x, leg_y, height):
     t_feet = t_launch + t2
     d_feet = d_launch + VX_REBOUND * t2
     t_end = t_feet + STAND_END
+    eyes = []
+    for k in range(2):
+        t_ret = t_feet + EYE_RETURN_DELAY + k * EYE_STAGGER
+        t_abs = t_ret + EYE_ROLL_BACK
+        t_flt = t_abs + EYE_ABSORB
+        t_pop = t_flt + EYE_FLOAT
+        eyes.append(dict(t_eject=t_head, t_return=t_ret, t_absorb=t_abs, t_float=t_flt, t_pop=t_pop,
+                         t_done=t_pop + EYE_POP))
+    kicks = [(e["t_absorb"], -0.5) for e in eyes] + [(e["t_pop"] + EYE_POP * 0.5, 0.7) for e in eyes]
 
     sq, sq_v = sq, sq_v + 2.5                       # spring off the ground: stretch
     n_trip = int(math.ceil(t_end * fps))
@@ -278,6 +298,9 @@ def plan(fps, leg_x, leg_y, height):
             tau = tt - t_feet
             if tau < 1.0 / fps:
                 sq_v -= 3.5
+            for tk, kv in kicks:                    # gulp as each eye sinks in, jiggle as it pops out
+                if tk <= tt < tk + 1.0 / fps:
+                    sq_v += kv
             d = d_feet + VX_REBOUND * 0.12 * (1 - math.exp(-tau / 0.12))
             cz = C
             theta = 2 * math.pi
@@ -290,8 +313,10 @@ def plan(fps, leg_x, leg_y, height):
                         contact=contact, tuck=tuck, hold_w=hold_w, smoosh=smoosh))
 
     t0 = last["t"]
+    eyes = [{k: t0 + v for k, v in e.items()} for e in eyes]
     return dict(frames=out, hurdle=hurdle, t_takeoff=t0, t_clip=t0 + t_clip, t_head=t0 + t_head,
-                t_feet=t0 + t_feet, start=START, h0=H0)
+                t_feet=t0 + t_feet, eyes=eyes, t_frown=t0 + t_feet + FROWN_DELAY,
+                t_smile=max(e["t_done"] for e in eyes), start=START, h0=H0)
 
 
 def spring(x, v, target, dt, sub=10):
