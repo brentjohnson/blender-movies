@@ -871,8 +871,9 @@ tt.up_axis = 'UP_Y'
 scene.camera = cam
 if ANIM == "walk":
     # The aim follows him with operator-style lag; the camera trucks sideways after it, lagging more.
-    # After he lands, the camera swings round past him (overshooting a little) to a 3/4 front view, looking
-    # back at his face, and the aim moves up to his face.
+    # After he lands, the camera keeps going along its track, straight past him, so it ends up ahead of him
+    # looking back at his face (3/4 front); the aim moves up to his face. (Interpolating an orbit angle here
+    # spun the camera a full 360: his heading has accumulated 2*pi from the walk circle.)
     cam_data.lens = 55
     cam_data.dof.aperture_fstop = 5.6
     fps = scene.render.fps
@@ -880,7 +881,8 @@ if ANIM == "walk":
     end = PLAN["frames"][-1]
     hub = Vector((end["x"], end["y"], 0.0))
     face = hub + Vector((0, 0, 0.36))
-    front = end["yaw"] - math.pi / 2                # his heading
+    heading = end["yaw"] - math.pi / 2
+    ahead = Vector((math.cos(heading), math.sin(heading), 0))
     a = c = None
     orbit0 = None
     for i, f in enumerate(PLAN["frames"]):
@@ -892,17 +894,13 @@ if ANIM == "walk":
         aim_loc, cam_loc = a, c
         if t >= t_orbit:
             if orbit0 is None:
-                rel = c - hub
-                orbit0 = (math.atan2(rel.y, rel.x), rel.xy.length, c.z, a.copy())
-            ang0, r0, z0, a0 = orbit0
+                c_end = hub + ahead * 2.2 + (c - hub - ahead * (c - hub).dot(ahead)) * 0.8
+                c_end.z = 0.42
+                orbit0 = (c.copy(), c_end, a.copy())
+            c0, c_end, a0 = orbit0
             u = min((t - t_orbit) / walk.CAM_MOVE, 1.0)
             e = u * u * (3 - 2 * u)
-            c1 = 1.70158                            # ease-out-back: sweeps a little past, then settles
-            eb = 1 + (c1 + 1) * (e - 1) ** 3 + c1 * (e - 1) ** 2
-            ang1 = front - math.radians(35)         # 3/4 front, on the camera's side
-            ang = ang0 + (ang1 - ang0) * eb
-            r = r0 + (2.4 - r0) * e
-            cam_loc = hub + Vector((math.cos(ang) * r, math.sin(ang) * r, z0 + (0.42 - z0) * e))
+            cam_loc = c0.lerp(c_end, e)
             aim_loc = a0.lerp(face, e)
         aim.location, cam.location = aim_loc, cam_loc
         aim.keyframe_insert("location", frame=F0 + i)

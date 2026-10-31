@@ -72,8 +72,10 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   splat and roll away. Once he's standing they roll back, sink into the front of his base, float up through
   him and pop out into their sockets, with a body "gulp" and jiggle for each. He frowns when he notices
   they're gone (`FROWN_DELAY`) and grins when the second one pops in. The face is a "Frown" shape key on
-  the mouth curve; negative values give a bigger grin. After he lands, the camera swings round past him
-  (ease-out-back) to a 3/4 front view and aims at his face (`CAM_DELAY`, `CAM_MOVE`). The hurdle rocks forward
+  the mouth curve; negative values give a bigger grin. After he lands, the camera carries on along its track in a
+  straight line, ending 2.2 m past him and slightly closer, with the aim on his face. It ends up looking back
+  at him from a 3/4 front view (`CAM_DELAY`, `CAM_MOVE`). Don't interpolate an orbit angle here: his heading
+  has accumulated 2π from the walk circle, which spun the camera a full 360°. The hurdle rocks forward
   and rattles back down.
   Gait frames: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs
   to the next plant. The body bobs, sways, leans and banks; banking lifts him so the wide base never cuts the floor.
