@@ -149,6 +149,11 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - **Object-coordinate textures on scaled objects.** Coordinates stay in unscaled local units (±1).
   Apply scale (`transform_apply(scale=True)`) on big planes before using object-space textures.
   Same for Displace modifiers: use `texture_coords='GLOBAL'` and sizes in meters.
+- **Coloured shadows from refractive/volume objects.** Cycles almost never finds caustic paths from soft area
+  lights through a refractive shell. More samples and MNEE didn't help through an absorbing volume, so the shadow
+  stays grey. Instead, mix in a Transparent BSDF for *Is Shadow Ray*, gated to rays arriving from outside
+  (`max(1 - Backfacing, min(TransparentDepth, 1))`). The interior volume then tints the shadow, and the inside
+  doesn't wash out. It shows best under one dominant hard light. See blob-movie.
 - **Adaptive fluid domain + motion blur = vertical streaks.** The domain transform changes every frame.
   Set `domain.cycles.use_motion_blur = False`.
 

@@ -98,10 +98,29 @@ def mat_body():
                                             "Transmission Weight": 1.0,
                                             "Roughness": float(os.environ.get("SKIN_ROUGH", "0.12")),
                                             "IOR": 1.36})
-    n.link(surf.outputs[0], out.inputs["Surface"])
+    if os.environ.get("GREEN_SHADOW", "1") == "1":
+        # Cycles can't find light paths through refracting jelly from soft lights, so the floor gets a plain
+        # grey shadow. Let shadow rays pass the skin instead: the volume still absorbs them, so the shadow
+        # turns green and thick parts cast deeper green than thin ones.
+        # Only rays coming from outside (front face, or already through the near side) pass. Shadow rays
+        # starting inside him stay blocked, so his milky interior isn't lit directly and doesn't wash out.
+        lp = n("ShaderNodeLightPath")
+        geo = n("ShaderNodeNewGeometry")
+        outside = n.math('MAXIMUM', n.math('SUBTRACT', 1.0, geo.outputs["Backfacing"]),
+                         n.math('MINIMUM', lp.outputs["Transparent Depth"], 1.0))
+        # The skin tints the light too (once in, once out), on top of the volume's absorption, so the
+        # green survives AgX and the grey fill on the floor.
+        tint = float(os.environ.get("SHADOW_TINT", "1.0"))
+        clear = n("ShaderNodeBsdfTransparent", Color=(1 - 0.6 * tint, 1 - 0.05 * tint, 1 - 0.65 * tint, 1))
+        mix = n("ShaderNodeMixShader", Factor=n.math('MULTIPLY', lp.outputs["Is Shadow Ray"], outside))
+        n.link(surf.outputs[0], mix.inputs[1])
+        n.link(clear.outputs[0], mix.inputs[2])
+        n.link(mix.outputs[0], out.inputs["Surface"])
+    else:
+        n.link(surf.outputs[0], out.inputs["Surface"])
     # Volume: green absorption + a little milky scatter so light glows through him.
     absorb = n("ShaderNodeVolumeAbsorption", Color=(*BODY_GREEN, 1),
-               Density=float(os.environ.get("ABSORB", "9.0")))
+               Density=float(os.environ.get("ABSORB", "11.0")))
     scat = n("ShaderNodeVolumeScatter", Color=(0.55, 1.0, 0.5, 1),
              Density=float(os.environ.get("SCATTER", "0.8")), Anisotropy=0.3)
     add = n("ShaderNodeAddShader")
@@ -228,6 +247,13 @@ def flatten_soles(me):
             new_r = rv.normalized() * dr * k if dr > 1e-9 else rv
             v.co.x, v.co.y = (axis + new_r)
             v.co.z = cz + dz * k
+    # The measured "leg radius" spans the whole merged base (~0.26 m), which gives the chosen look, but the
+    # second leg's pass pushes a few hundred already-moved vertices on his left below the floor. They sit
+    # inside the footprint, so lifting them onto the sole plane just completes the flat sole. Unlifted, they
+    # stayed hidden under the floor while standing, but floated him 7 cm up whenever he left the ground.
+    for v in me.vertices:
+        if v.co.z < 0:
+            v.co.z = 0.0
 
 
 flatten_soles(me)
@@ -296,7 +322,7 @@ from mathutils.bvhtree import BVHTree
 scene.render.fps = 24
 scene.frame_start = 1
 if ANIM == "walk":
-    PLAN = walk.plan(scene.render.fps, LEG_X, LEG_Y)
+    PLAN = walk.plan(scene.render.fps, LEG_X, LEG_Y, height)
     scene.frame_end = len(PLAN["frames"])
 else:
     scene.frame_end = int(os.environ.get("FRAMES", "240"))
@@ -473,46 +499,97 @@ if ANIM == "walk":
         o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "body"
         o.matrix_parent_inverse = bone_rest.inverted()
 
-    # Bake the plan into per-frame keys. Each bone gets a world transform W applied to its rest geometry:
-    # matrix_basis = rest^-1 @ W @ rest (@ squash, in bone space: bone Y is up).
-    def keyframe(pb, W, fr, scale=None):
+    # Bake the plan into per-frame keys. Every bone gets an affine world transform M applied to its rest
+    # geometry: matrix_basis = rest^-1 @ M @ rest. M is rigid times a volume-keeping squash along the body's
+    # up axis about some anchor height. All three bones point up in rest, so this never needs shear.
+    def keyframe(pb, M, fr):
         rest = pb.bone.matrix_local
-        basis = rest.inverted() @ W @ rest
-        if scale:
-            basis = basis @ Matrix.Diagonal((*scale, 1.0))
-        pb.matrix_basis = basis
+        pb.matrix_basis = rest.inverted() @ M @ rest
         for path in ("location", "rotation_quaternion", "scale"):
             pb.keyframe_insert(path, frame=fr)
 
+    def squash_about(sq, anchor):
+        side = 1 / math.sqrt(sq)
+        return (Matrix.Translation((0, 0, anchor)) @ Matrix.Diagonal((side, side, sq, 1.0))
+                @ Matrix.Translation((0, 0, -anchor)))
+
+    # a sparse set of rest vertices, to keep him on (and out of) the floor while tumbling
+    floor_probe = [v.co.copy() for v in list(me.vertices)[::12]]
+    # while walking the feet carry themselves; probe only what the body bone fully owns
+    body_gi = groups["body"].index
+    body_probe = [v.co.copy() for v in list(me.vertices)[::6]
+                  if any(g.group == body_gi and g.weight > 0.98 for g in v.groups)]
     piv = Matrix.Translation((0, 0, walk.PIVOT))
+    hold = None
     for i, f in enumerate(PLAN["frames"]):
         fr = F0 + i
-        sq = f["squash"]
-        W = (Matrix.Translation((f["x"], f["y"], f["z"])) @ Matrix.Rotation(f["yaw"], 4, 'Z')
-             @ Matrix.Translation((f["sway"], 0, 0))
-             @ piv @ Matrix.Rotation(f["pitch"], 4, 'X') @ Matrix.Rotation(f["roll"], 4, 'Y') @ piv.inverted())
-        keyframe(rig.pose.bones["body"], W, fr, scale=(1 / math.sqrt(sq), sq, 1 / math.sqrt(sq)))
-        for (name, sd), (fx, fy, fz, fyaw) in zip(LEGS, f["feet"]):
-            W = (Matrix.Translation((fx, fy, fz)) @ Matrix.Rotation(fyaw, 4, 'Z')
-                 @ Matrix.Translation((-sd * LEG_X, -LEG_Y, 0)))
-            keyframe(rig.pose.bones[name], W, fr)
+        if f["mode"] == "gait":
+            W = (Matrix.Translation((f["x"], f["y"], f["z"])) @ Matrix.Rotation(f["yaw"], 4, 'Z')
+                 @ Matrix.Translation((f["sway"], 0, 0))
+                 @ piv @ Matrix.Rotation(f["pitch"], 4, 'X') @ Matrix.Rotation(f["roll"], 4, 'Y')
+                 @ piv.inverted())
+            M = W @ squash_about(f["squash"], walk.PIVOT)
+            low = min((M @ q).z for q in body_probe)
+            if low < 0:                             # banking/leaning swings the wide base down: lift him
+                M = Matrix.Translation((0, 0, -low)) @ M
+            keyframe(rig.pose.bones["body"], M, fr)
+            for (name, sd), (fx, fy, fz, fyaw) in zip(LEGS, f["feet"]):
+                W = (Matrix.Translation((fx, fy, fz)) @ Matrix.Rotation(fyaw, 4, 'Z')
+                     @ Matrix.Translation((-sd * LEG_X, -LEG_Y, 0)))
+                keyframe(rig.pose.bones[name], W, fr)
+            continue
+        # tumble: rigid rotation about the body's middle, squash about head / middle / feet
+        W = (Matrix.Translation((f["x"], f["y"], f["cz"])) @ Matrix.Rotation(f["yaw"], 4, 'Z')
+             @ Matrix.Rotation(f["theta"], 4, 'X') @ Matrix.Rotation(f["roll"], 4, 'Y')
+             @ Matrix.Translation((0, 0, -f["C"])))
+        M = W @ squash_about(f["squash"], f["anchor"])
+        low = min((M @ q).z for q in floor_probe)
+        if f["contact"] or low < 0:                 # touching the floor exactly, never through it
+            M = Matrix.Translation((0, 0, -low)) @ M
+        keyframe(rig.pose.bones["body"], M, fr)
+        for name, sd in LEGS:
+            ML = M @ Matrix.Translation((0, 0, f["tuck"]))
+            if name == "leg.R" and f["hold_w"] > 0:  # the foot that clipped the bar lags behind
+                sole = ML @ Vector((sd * LEG_X, LEG_Y, 0))
+                if hold is None:
+                    hold = sole.copy()
+                ML = Matrix.Translation((hold - sole) * f["hold_w"]) @ ML
+            keyframe(rig.pose.bones[name], ML, fr)
 
-    # the hurdle: two white posts on little feet and a red bar, square across his path
+    # the hurdle: two white posts on little feet and a red bar, square across his path. It hangs from an
+    # empty on the front edge of its feet, so when he clips it, it rocks forward and rattles back down.
     hx, hy, hh = PLAN["hurdle"]
+    fwd = Vector((math.cos(hh), math.sin(hh), 0))
+    across = Vector((-math.sin(hh), math.cos(hh), 0))
+    rocker = link(bpy.data.objects.new("Hurdle", None))
+    rocker.location = Vector((hx, hy, 0)) + fwd * 0.07
+    rocker.rotation_euler = (0, 0, hh)
     M_HURDLE = mat_simple("HurdleWhite", (0.85, 0.85, 0.82), rough=0.35)
     M_BAR = mat_simple("HurdleRed", (0.75, 0.05, 0.04), rough=0.3, coat=0.5)
-    across = Vector((-math.sin(hh), math.cos(hh), 0))
+    parts = []
     for sd in (-1, 1):
         base = Vector((hx, hy, 0)) + across * sd * 0.32
         bpy.ops.mesh.primitive_cylinder_add(radius=0.01, depth=walk.HURDLE_H, location=base + Vector((0, 0, walk.HURDLE_H / 2)))
         bpy.context.object.data.materials.append(M_HURDLE)
+        parts.append(bpy.context.object)
         bpy.ops.mesh.primitive_cube_add(size=1, location=base + Vector((0, 0, 0.006)), rotation=(0, 0, hh))
         bpy.context.object.scale = (0.14, 0.03, 0.012)
         bpy.context.object.data.materials.append(M_HURDLE)
+        parts.append(bpy.context.object)
     bpy.ops.mesh.primitive_cylinder_add(radius=0.012, depth=0.66, location=(hx, hy, walk.HURDLE_H),
                                         rotation=(math.pi / 2, 0, hh))
     bpy.context.object.data.materials.append(M_BAR)
     bpy.ops.object.shade_smooth()
+    parts.append(bpy.context.object)
+    bpy.context.view_layer.update()
+    for o in parts:
+        o.parent = rocker
+        o.matrix_parent_inverse = rocker.matrix_world.inverted()
+    for i in range(len(PLAN["frames"])):
+        tau = (F0 + i - 1) / scene.render.fps - PLAN["t_clip"]
+        tip = 0.0 if tau < 0 else math.radians(22) * math.exp(-tau / 0.22) * abs(math.sin(2 * math.pi * 2.2 * tau))
+        rocker.rotation_euler = (0, tip, hh)
+        rocker.keyframe_insert("rotation_euler", frame=F0 + i)
 
 
 # --------------------------------------------------------------------------- set: cyclorama
@@ -564,6 +641,20 @@ lamp("Key", (-1.4, -1.6, 1.7), 70 * (2.2 if ANIM == "walk" else 1), 1.2, (1.0, 0
 lamp("Fill", (1.8, -1.2, 0.6), 50, 2.0, (0.85, 0.92, 1.0))
 lamp("Rim", (0.9, 1.3, 1.3), 260, 0.8, (1.0, 0.98, 0.92))   # back light makes him glow
 lamp("RimL", (-1.0, 1.2, 0.5), 120, 0.6, (0.9, 1.0, 0.95))
+
+# Hard back light, high behind him: throws a crisp shadow toward the camera, where the light that
+# comes through him shows up green on the floor.
+BACK_W = float(os.environ.get("BACK_W", "1500"))
+sd = bpy.data.lights.new("Back", 'SPOT')
+sd.energy = BACK_W * LS * LS
+sd.shadow_soft_size = 0.04
+sd.spot_size = math.radians(70 if ANIM == "walk" else 40)
+sd.spot_blend = 0.4
+sd.color = (1.0, 0.97, 0.9)
+back = link(bpy.data.objects.new("Back", sd))
+back.location = LC + Vector((0.35, 1.4, 1.5)) * LS
+back.rotation_euler = (center - back.location).to_track_quat('-Z', 'Y').to_euler()
+back.visible_camera = False
 
 world = bpy.data.worlds.new("World")
 scene.world = world

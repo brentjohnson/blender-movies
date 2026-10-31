@@ -11,7 +11,7 @@ only what is specific to this movie.
 ```
 scripts/build_scene.py   -> blob.blend (ANIM=walk -> blob_walk.blend)
 scripts/walk.py          walk-test choreography (pure math, imported by build_scene.py)
-tests/                   look-dev stills (blob_v1..v7, blob_hero; v6 = silver flakes, v7 = cylinder legs)
+tests/                   look-dev stills (blob_v1..v8, blob_hero; v6 = silver flakes, v7 = cylinder legs, v8 = green shadow)
   preview/               low-res sparkle-drift preview frames (PCT=40 SAMPLES=16 OUT=tests/preview)
   walk/                  low-res walk-test frames (PCT=50 SAMPLES=16 OUT=tests/walk)
 ```
@@ -28,7 +28,7 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
 ../scripts/encode.sh
 ```
 
-- `build_scene.py` env overrides: `ANIM` (idle | walk), `ABSORB` (volume density, 9.0), `SCATTER` (0.8), `SKIN_ROUGH` (0.12),
+- `build_scene.py` env overrides: `ANIM` (idle | walk), `ABSORB` (volume density, 11.0), `GREEN_SHADOW` (1), `SHADOW_TINT` (1.0), `BACK_W` (1500), `SCATTER` (0.8), `SKIN_ROUGH` (0.12),
   `FLAKE_COUNT` (900), `FLAKE_SIZE` (0.004, hex radius), `DRIFT` (0.0125 m/s), `TUMBLE` (0.5 rad/s),
   `FRAMES` (240 at 24 fps; walk sets its own length), `LEG_R` (0.12), `LEG_X` (0.105), `LEG_Z` (0.03), `LEG_FILLET` (0.35), `FLAKE_ROUGH` (0.04, min of a 0.04–0.16 per-flake spread), `SAMPLES` (128), `RES_PCT`, `EXPOSURE` (−0.6).
 - No Blender simulations, so there is nothing to bake. The flake drift is simulated in `build_scene.py` (~7 s).
@@ -42,9 +42,19 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   `flatten_soles()` moves each lower-hemisphere vertex along its ray from the hemisphere centre onto a
   rounded-cylinder profile (flat sole, fillet = `LEG_FILLET` × leg radius). Thinner/lower capsules gave
   spindly or pinched legs; the chosen look is `tests/blob_v7_legs.png`.
+  The measured leg radius actually spans the whole merged base (~0.26 m). That's part of the chosen look; an
+  exact projection onto the profile turned his bottom into a wide puck. The second leg's pass pushed ~550
+  vertices below z=0. They were hidden while standing but floated him 7 cm whenever the floor clamp ran, so
+  they're lifted onto the sole plane.
 - **Material.** A refractive shell around a volume with absorption and scattering (anisotropy 0.3). It needs high
   transmission/transparent bounce limits (12–16), and `volume_step_rate = 0.5` because the body is small.
   Refractive caustics are on, and `blur_glossy = 0.5` keeps them clean.
+- **Green shadow.** Real caustics don't show: even at 1024 spp, and with MNEE shadow caustics, the floor got no
+  green. Instead, shadow rays pass through the skin (Light Path *Is Shadow Ray* → Transparent BSDF), so the volume
+  tints them. Only rays coming from outside pass (front face, or Transparent Depth ≥ 1). Shadow rays starting
+  inside stay blocked; letting those through lit the milky interior directly and washed him out. The transparent
+  BSDF adds its own green (`SHADOW_TINT`) so the colour survives AgX and the fill. A hard spot `Back` light (`BACK_W`)
+  high behind him throws the shadow toward the camera. `ABSORB` went 9 → 11 to offset the extra light.
 - **Sparkles.** Weightless silver glitter, like a snow globe with no gravity. `build_scene.py` simulates each
   hex flake drifting on curl noise (divergence-free, so flakes don't bunch up) and tumbling. Near the skin
   the outward velocity is cancelled and the flake is pushed in, with a hard stop at `MARGIN`. Eyeballs are
@@ -54,16 +64,24 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   Checked: no flake leaves the body in any frame, and the mean height stays at 0.26 m throughout.
   Flakes also stay above `FLAKE_FLOOR` (0.12 m), out of the legs, because the legs deform when he walks.
 - **Walk test (`ANIM=walk`).** `walk.py` plans everything per frame: stand, walk a 0.55 m circle at 0.45 m/s,
-  speed up through a 90° turn into a 1.5 m/s run, hop a 0.18 m hurdle (ballistic, 0.22 m lift), and skid to a stop.
-  Gait: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs to the
-  next plant, and the feet settle under him when he's still. The body bobs (vaults when walking, sinks when
-  running), sways toward the stance leg, leans with speed and acceleration, and banks into turns. Squash/stretch
-  is a 4 Hz damped spring kicked at takeoff and landing, giving a jelly wobble.
-  Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles). Leg weights
-  fade into the body by z=0.11, so the jelly stretches between planted feet and the body. Eyes, mouth and
-  flakes are bone-parented to `body`. Keys are baked per frame (`matrix_basis = rest⁻¹ @ W @ rest`).
+  speed up through a 90° turn into a 1.5 m/s run, and try to hop a 0.24 m hurdle. The hop is too low
+  (`TRIP_LIFT` 0.15), so his right foot catches the bar at the top of it. The foot sticks briefly, the bar
+  pops him up (`CLIP_POP`), and he rotates forward exactly π by the time his head reaches the floor. There he
+  squashes about the top of his head to 1/3 height (×1.74 wider, volume kept), holds, springs back up, finishes
+  the flip in the air, lands on his feet with a jelly splat, and does a dizzy wobble. The hurdle rocks forward
+  and rattles back down.
+  Gait frames: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs
+  to the next plant. The body bobs, sways, leans and banks; banking lifts him so the wide base never cuts the floor.
+  Tumble frames: rigid rotation `theta` about the body's middle, squash anchored at head, middle or feet, and the
+  legs ride the body (plus tuck). A floor probe of rest vertices keeps him exactly on the floor during contacts
+  and above it in the air.
+  Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles), all
+  pointing up, so an affine M = rigid @ squash-along-up never needs shear: `matrix_basis = rest⁻¹ @ M @ rest`.
+  Leg weights fade into the body by z=0.11, so the jelly stretches between planted feet and the body. Eyes,
+  mouth and flakes are bone-parented to `body` and squash with it.
   Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
-  Lights: the same rig scaled 1.6× around the course, with a wider key. Lights are hidden from the camera.
+  Lights: the same rig (plus the back spot, widened to 70°) scaled 1.6× around the course, with a wider key.
+  Lights are hidden from the camera.
 - **Set.** A cyclorama with area lights. Narrowing an area light's `spread` concentrates its power, so lower `energy` to match.
 - **Camera.** 85 mm. Render at 1280×720, CPU, light tree on.
 - **Compositor.** None. The bloom glare was removed along with the glowing motes, because sparkles should glint, not glow.
