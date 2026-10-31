@@ -1,7 +1,8 @@
 """Build the green blob character in a simple studio set.
 
 Run:  ./run.sh -b --factory-startup -P scripts/build_scene.py
-Saves blob.blend in the project root.
+Saves blob.blend in the project root. ANIM=walk builds the walk test instead (scripts/walk.py) and saves
+blob_walk.blend: he walks a circle, runs, hops a hurdle and skids to a stop.
 
 The body is a metaball field (body + stubby arms/feet melt into one surface), converted to a mesh.
 It's a refractive shell around a green absorbing/scattering volume, with sparkles suspended inside.
@@ -11,9 +12,14 @@ import bpy
 import math
 import os
 import random
-from mathutils import Vector, Quaternion
+import sys
+from mathutils import Vector, Quaternion, Matrix
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import walk  # noqa: E402
+
+ANIM = os.environ.get("ANIM", "idle")      # idle: standing hero pose; walk: walk/run/hop test
 random.seed(11)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -89,7 +95,8 @@ def mat_body():
     m, n, out = material("BlobBody")
     # Surface: clear jelly skin. The green comes mostly from the volume, so thick parts read deeper.
     surf = n("ShaderNodeBsdfPrincipled", **{"Base Color": (0.82, 1.0, 0.8, 1),
-                                            "Transmission Weight": 1.0, "Roughness": 0.12,
+                                            "Transmission Weight": 1.0,
+                                            "Roughness": float(os.environ.get("SKIN_ROUGH", "0.12")),
                                             "IOR": 1.36})
     n.link(surf.outputs[0], out.inputs["Surface"])
     # Volume: green absorption + a little milky scatter so light glows through him.
@@ -104,25 +111,15 @@ def mat_body():
     return m
 
 
-def mat_sparkle_glow():
-    """Tiny self-lit motes; each one gets a slightly different warm/cool tint and brightness."""
-    m, n, out = material("SparkleGlow")
-    info = n("ShaderNodeObjectInfo")
-    ramp = n("ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].color = (1.0, 0.92, 0.55, 1)   # warm gold
-    ramp.color_ramp.elements[1].color = (0.75, 1.0, 0.95, 1)   # cool mint-white
-    n.link(info.outputs["Random"], ramp.inputs["Factor"])
-    strength = n.math('MULTIPLY_ADD', info.outputs["Random"], 120.0, 30.0)
-    em = n("ShaderNodeEmission", Color=ramp.outputs[0], Strength=strength)
-    n.link(em.outputs[0], out.inputs["Surface"])
-    return m
-
-
 def mat_sparkle_flake():
-    """Glitter flakes: mirror-like, so they glint when they catch a light."""
+    """Silver glitter flakes: no emission, just polished metal that glints when it catches a light.
+    Each flake gets a slightly different roughness so some flash sharply and some shimmer."""
     m, n, out = material("SparkleFlake")
-    b = n("ShaderNodeBsdfPrincipled", **{"Base Color": (1.0, 0.97, 0.85, 1), "Metallic": 1.0,
-                                         "Roughness": 0.08})
+    info = n("ShaderNodeObjectInfo")
+    r0 = float(os.environ.get("FLAKE_ROUGH", "0.04"))
+    rough = n.math('MULTIPLY_ADD', info.outputs["Random"], r0 * 3.0, r0)
+    b = n("ShaderNodeBsdfPrincipled", **{"Base Color": (0.92, 0.93, 0.95, 1), "Metallic": 1.0,
+                                         "Roughness": rough})
     n.link(b.outputs[0], out.inputs["Surface"])
     return m
 
@@ -143,7 +140,6 @@ def mat_backdrop():
 
 
 M_BODY = mat_body()
-M_GLOW = mat_sparkle_glow()
 M_FLAKE = mat_sparkle_flake()
 M_EYE_WHITE = mat_simple("EyeWhite", (0.9, 0.9, 0.88), rough=0.25, coat=1.0)
 M_PUPIL = mat_simple("Pupil", (0.01, 0.012, 0.015), rough=0.15, coat=1.0)
@@ -179,9 +175,14 @@ ball('ELLIPSOID', (0, 0, 0.18), 0.34, size=(1.05, 0.95, 0.75))
 for s in (-1, 1):
     ball('CAPSULE', (s * 0.22, -0.01, 0.23), 0.085, size=(0.045, 1, 1),
          rot=axis_rot((s, -0.15, -0.55)))
-# short feet, poking forward
+# short cylindrical legs: vertical capsules here; their round bottoms are flattened after meshing
+LEG_X = float(os.environ.get("LEG_X", "0.105"))       # leg axis offset from the centre line, m
+LEG_Y = -0.02
+LEG_R = float(os.environ.get("LEG_R", "0.12"))       # metaball radius of a leg
+LEG_FILLET = float(os.environ.get("LEG_FILLET", "0.35"))  # sole edge radius, as a fraction of leg radius
+LEG_Z = float(os.environ.get("LEG_Z", "0.03"))   # leg capsule centre, before sitting him on the floor
 for s in (-1, 1):
-    ball('ELLIPSOID', (s * 0.11, -0.05, 0.03), 0.13, size=(0.85, 1.15, 0.6))
+    ball('CAPSULE', (s * LEG_X, LEG_Y, LEG_Z), LEG_R, size=(0.03, 1, 1), rot=axis_rot((0, 0, 1)))
 
 meta_obj = link(bpy.data.objects.new("BlobMeta", mb))
 dg = bpy.context.evaluated_depsgraph_get()
@@ -193,6 +194,43 @@ bpy.data.metaballs.remove(mb)
 zmin = min(v.co.z for v in me.vertices)
 for v in me.vertices:
     v.co.z -= zmin
+
+
+def flatten_soles(me):
+    """Turn each leg's round bottom into a flat sole with a soft, filleted edge.
+
+    Below the hemisphere centre, every vertex moves along its ray from that centre, from the sphere out
+    onto a rounded-cylinder profile (flat bottom, quarter-circle fillet, vertical side). Straight-down and
+    sideways rays keep their length, so the sole stays at the floor and the side joins smoothly."""
+    for s in (-1, 1):
+        axis = Vector((s * LEG_X, LEG_Y))
+        near = [v for v in me.vertices if (v.co.xy - axis).length < LEG_R * 2.5]
+        # leg radius: widest point of the leg a little above the floor
+        R = max((v.co.xy - axis).length for v in near if v.co.z < 0.03)
+        f = R * LEG_FILLET
+        cz = R                                        # hemisphere centre height (sole sits at z = 0)
+        for v in near:
+            dz = v.co.z - cz
+            rv = v.co.xy - axis
+            dr = rv.length
+            if dz >= 0 or dr > R * 1.2:
+                continue
+            L = math.hypot(dr, dz)
+            ur, uz = dr / L, dz / L                   # ray direction in the (radial, z) plane, uz < 0
+            t = R / -uz                               # hit the flat sole?
+            if t * ur > R - f:
+                t = R / ur if ur > 1e-9 else t        # hit the vertical side?
+                if ur <= 1e-9 or cz + t * uz < f:     # otherwise the fillet (circle at (R-f, f))
+                    ox, oz = -(R - f), cz - f         # ray origin relative to the fillet centre
+                    b = ox * ur + oz * uz
+                    t = -b + math.sqrt(max(b * b - (ox * ox + oz * oz - f * f), 0.0))
+            k = t / R                                 # sphere -> rounded cylinder along this ray
+            new_r = rv.normalized() * dr * k if dr > 1e-9 else rv
+            v.co.x, v.co.y = (axis + new_r)
+            v.co.z = cz + dz * k
+
+
+flatten_soles(me)
 for p in me.polygons:
     p.use_smooth = True
 me.materials.append(M_BODY)
@@ -247,42 +285,234 @@ link(bpy.data.objects.new("Mouth", cu))
 
 
 # --------------------------------------------------------------------------- sparkles inside
-# Instance sources live far below the floor, out of view.
-bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1, location=(0, 0, -50))
-glow_src = bpy.context.object
-glow_src.name = "SparkleGlowSrc"
-glow_src.data.materials.append(M_GLOW)
+# Weightless glitter, like a snow globe with no gravity. Each flake drifts on a slowly changing swirl
+# (curl noise, so the flow neither bunches up nor thins out) and tumbles, so its glints come and go.
+# The skin and the eyeballs push flakes away, so they never leave the body or pass through the eyes.
+# Every frame is simulated here and stored as one point per flake per frame in the "Flakes" mesh.
+# A geometry-nodes tree keeps only the current frame's points and puts a hex flake on each.
+from mathutils import noise
+from mathutils.bvhtree import BVHTree
 
-bpy.ops.mesh.primitive_plane_add(size=2, location=(0, 0, -52))
-flake_src = bpy.context.object
-flake_src.name = "SparkleFlakeSrc"
-flake_src.data.materials.append(M_FLAKE)
+scene.render.fps = 24
+scene.frame_start = 1
+if ANIM == "walk":
+    PLAN = walk.plan(scene.render.fps, LEG_X, LEG_Y)
+    scene.frame_end = len(PLAN["frames"])
+else:
+    scene.frame_end = int(os.environ.get("FRAMES", "240"))
+F0, F1 = scene.frame_start, scene.frame_end
 
+FLAKE_COUNT = int(os.environ.get("FLAKE_COUNT", "900"))
+FLAKE_SIZE = float(os.environ.get("FLAKE_SIZE", "0.004"))      # hex radius, m
+DRIFT = float(os.environ.get("DRIFT", "0.0125"))               # typical drift speed, m/s
+TUMBLE = float(os.environ.get("TUMBLE", "0.5"))                # typical spin, rad/s
+SWIRL_SCALE = 0.12                                             # size of the flow's eddies, m
+WALL = 0.03                                                    # skin starts pushing within this, m
+MARGIN = FLAKE_SIZE * 1.6                                      # closest a flake centre gets to the skin
+FLAKE_FLOOR = 0.12        # flakes stay in the torso, above the legs, so leg deformation can't expose them
 
-def sparkle_system(name, src, count, size, rand, seed):
-    ps = body.modifiers.new(name, 'PARTICLE_SYSTEM').particle_system
-    ps.seed = seed
-    p = ps.settings
-    p.name = name
-    p.type = 'HAIR'
-    p.count = count
-    p.emit_from = 'VOLUME'
-    p.distribution = 'RAND'
-    p.hair_length = 1.0          # hair instances are scaled by hair length
-    p.render_type = 'OBJECT'
-    p.instance_object = src
-    p.particle_size = size
-    p.size_random = rand
-    p.use_rotations = True
-    p.rotation_mode = 'NONE'
-    p.rotation_factor_random = 1.0
-    p.use_advanced_hair = True
-    return ps
+bvh = BVHTree.FromObject(body, bpy.context.evaluated_depsgraph_get())
+EYES = [(o.location.copy(), max(o.scale) * o.dimensions.x / o.scale.x / 2 + MARGIN)
+        for o in bpy.data.objects if o.name.startswith("Eye")]
 
 
-sparkle_system("glow", glow_src, int(os.environ.get("GLOW_COUNT", "70")), 0.0035, 0.7, 3)
-sparkle_system("flakes", flake_src, int(os.environ.get("FLAKE_COUNT", "400")), 0.006, 0.6, 5)
-body.show_instancer_for_render = True
+def depth(pnt):
+    """(distance inside the allowed space, negative outside; inward normal of the nearest boundary).
+    The boundary is the skin plus a floor at FLAKE_FLOOR."""
+    loc, nrm, _, dist = bvh.find_nearest(pnt)
+    d = dist if (loc - pnt).dot(nrm) > 0 else -dist
+    if pnt.z - FLAKE_FLOOR < d:
+        return pnt.z - FLAKE_FLOOR, Vector((0, 0, 1))
+    return d, -nrm
+
+
+def swirl(pnt, t):
+    """Divergence-free velocity: the curl of a slowly evolving noise potential."""
+    q = pnt / SWIRL_SCALE + Vector((0.065, 0.145, 0.105)) * t   # the flow pattern itself evolves slowly too
+    e = 0.01
+
+    def pot(dx, dy, dz):
+        return noise.noise_vector(q + Vector((dx, dy, dz)))
+    dpx, dmx = pot(e, 0, 0), pot(-e, 0, 0)
+    dpy, dmy = pot(0, e, 0), pot(0, -e, 0)
+    dpz, dmz = pot(0, 0, e), pot(0, 0, -e)
+    return Vector(((dpy.z - dmy.z) - (dpz.y - dmz.y),
+                   (dpz.x - dmz.x) - (dpx.z - dmx.z),
+                   (dpx.y - dmx.y) - (dpy.x - dmy.x))) / (2 * e)
+
+
+def avoid_eyes(pnt):
+    for c, r in EYES:
+        d = pnt - c
+        if d.length < r:
+            pnt = c + d.normalized() * r
+    return pnt
+
+
+# scatter the flakes through the body, clear of the skin and eyes
+lo = Vector(tuple(min(v.co[i] for v in body.data.vertices) for i in range(3)))
+hi = Vector(tuple(max(v.co[i] for v in body.data.vertices) for i in range(3)))
+flakes = []
+while len(flakes) < FLAKE_COUNT:
+    pnt = Vector(tuple(random.uniform(lo[i], hi[i]) for i in range(3)))
+    if depth(pnt)[0] > MARGIN * 1.5 and avoid_eyes(pnt) == pnt:
+        flakes.append({
+            "p": pnt,
+            "q": Quaternion(Vector([random.gauss(0, 1) for _ in range(3)]).normalized(),
+                            random.uniform(0, math.tau)),
+            "axis": Vector([random.gauss(0, 1) for _ in range(3)]).normalized(),
+            "spin": TUMBLE * random.uniform(0.4, 1.6) * random.choice((-1, 1)),
+            "size": FLAKE_SIZE * (1 - 0.6 * random.random()),
+        })
+
+# normalise the swirl so its typical speed is DRIFT
+SPEED_K = DRIFT / (sum(swirl(f["p"], 0).length for f in flakes[:200]) / min(200, len(flakes)))
+
+dt = 1.0 / scene.render.fps
+pos, rot, size, frame = [], [], [], []
+for fr in range(F0, F1 + 1):
+    t = (fr - F0) * dt
+    for f in flakes:
+        if fr > F0:
+            v = swirl(f["p"], t) * SPEED_K
+            d, inward = depth(f["p"])
+            if d < WALL:                       # near the skin: cancel the outward part and push in
+                out = -v.dot(inward)
+                if out > 0:
+                    v += inward * out
+                v += inward * DRIFT * 2.0 * (1 - max(d, 0) / WALL)
+            pnt = f["p"] + v * dt
+            d, inward = depth(pnt)
+            if d < MARGIN:                     # hard stop: never closer than MARGIN to the skin
+                pnt += inward * (MARGIN - d)
+            f["p"] = avoid_eyes(pnt)
+            f["q"] = Quaternion(f["axis"], f["spin"] * dt) @ f["q"]
+        pos.append(f["p"].copy())
+        rot.append(f["q"].to_euler())
+        size.append(f["size"])
+        frame.append(fr)
+
+fme = bpy.data.meshes.new("Flakes")
+fme.vertices.add(len(pos))
+fme.vertices.foreach_set("co", [c for v in pos for c in v])
+for name, kind, vals in (("rot", 'FLOAT_VECTOR', [c for e in rot for c in e]),
+                         ("size", 'FLOAT', size), ("frame", 'INT', frame)):
+    at = fme.attributes.new(name, kind, 'POINT')
+    at.data.foreach_set("vector" if kind == 'FLOAT_VECTOR' else "value", vals)
+flake_obj = link(bpy.data.objects.new("Flakes", fme))
+
+gn = bpy.data.node_groups.new("FlakeInstances", 'GeometryNodeTree')
+gn.interface.new_socket("Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+gn.interface.new_socket("Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+g = NT(gn)
+gin = g("NodeGroupInput")
+now = g("GeometryNodeInputSceneTime")
+cur = g.math('MAXIMUM', g.math('MINIMUM', g.math('ROUND', now.outputs["Frame"]), F1), F0)
+fr_attr = g("GeometryNodeInputNamedAttribute", data_type='INT', Name="frame")
+other = g("FunctionNodeCompare", data_type='FLOAT', operation='NOT_EQUAL',
+          A=fr_attr.outputs["Attribute"], B=cur, Epsilon=0.5)
+keep = g("GeometryNodeDeleteGeometry", domain='POINT', Geometry=gin.outputs[0],
+         Selection=other.outputs[0])
+hexf = g("GeometryNodeMeshCircle", fill_type='NGON', Vertices=6, Radius=1.0)
+hexm = g("GeometryNodeSetMaterial", Geometry=hexf.outputs["Mesh"], Material=M_FLAKE)
+rot_attr = g("GeometryNodeInputNamedAttribute", data_type='FLOAT_VECTOR', Name="rot")
+size_attr = g("GeometryNodeInputNamedAttribute", data_type='FLOAT', Name="size")
+e2r = g("FunctionNodeEulerToRotation", Euler=rot_attr.outputs["Attribute"])
+inst = g("GeometryNodeInstanceOnPoints", Points=keep.outputs[0], Instance=hexm.outputs[0],
+         Rotation=e2r.outputs[0], Scale=size_attr.outputs["Attribute"])
+gout = g("NodeGroupOutput")
+g.link(inst.outputs[0], gout.inputs[0])
+flake_obj.modifiers.new("instances", 'NODES').node_group = gn
+print("FLAKES", FLAKE_COUNT, "frames", F0, F1, "points", len(pos))
+
+
+# --------------------------------------------------------------------------- walk test: rig + animation
+def smoothstep(e0, e1, x):
+    t = min(max((x - e0) / (e1 - e0), 0.0), 1.0)
+    return t * t * (3 - 2 * t)
+
+
+if ANIM == "walk":
+    # Three bones, none parented: the body, and one per leg standing on its sole. The legs are free, so a
+    # planted foot stays put while the body moves on, and the jelly between them stretches.
+    arm = bpy.data.armatures.new("Rig")
+    rig = link(bpy.data.objects.new("Rig", arm))
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode='EDIT')
+    eb = arm.edit_bones.new("body")
+    eb.head, eb.tail = (0, 0, walk.PIVOT), (0, 0, walk.PIVOT + 0.3)
+    LEGS = (("leg.R", -1), ("leg.L", 1))        # his right leg is at -X (he faces -Y)
+    for name, sd in LEGS:
+        eb = arm.edit_bones.new(name)
+        eb.head, eb.tail = (sd * LEG_X, LEG_Y, 0), (sd * LEG_X, LEG_Y, 0.12)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Skin weights: leg bones own the bottom of each leg, fading into the body by LEG_TOP.
+    LEG_TOP = 0.11
+    groups = {n: body.vertex_groups.new(name=n) for n in ("body", "leg.R", "leg.L")}
+    for v in me.vertices:
+        ws = {}
+        for name, sd in LEGS:
+            d = (v.co.xy - Vector((sd * LEG_X, LEG_Y))).length
+            ws[name] = (1 - smoothstep(0.015, LEG_TOP, v.co.z)) * (1 - smoothstep(0.06, 0.13, d))
+        ws["body"] = max(0.0, 1.0 - sum(ws.values()))
+        for name, w in ws.items():
+            if w > 1e-4:
+                groups[name].add([v.index], w, 'REPLACE')
+    body.modifiers.remove(sm)                   # armature must deform before the smoothing pass
+    am = body.modifiers.new("rig", 'ARMATURE')
+    am.object = rig
+    sm = body.modifiers.new("smooth", 'CORRECTIVE_SMOOTH')
+    sm.iterations = 6
+    sm.use_only_smooth = True
+
+    # Eyes, mouth and flakes ride on the body bone.
+    bb = arm.bones["body"]
+    bone_rest = rig.matrix_world @ bb.matrix_local @ Matrix.Translation((0, bb.length, 0))
+    for o in [o for o in scene.objects if o.name.startswith(("Eye", "Pupil", "Mouth"))] + [flake_obj]:
+        o.parent, o.parent_type, o.parent_bone = rig, 'BONE', "body"
+        o.matrix_parent_inverse = bone_rest.inverted()
+
+    # Bake the plan into per-frame keys. Each bone gets a world transform W applied to its rest geometry:
+    # matrix_basis = rest^-1 @ W @ rest (@ squash, in bone space: bone Y is up).
+    def keyframe(pb, W, fr, scale=None):
+        rest = pb.bone.matrix_local
+        basis = rest.inverted() @ W @ rest
+        if scale:
+            basis = basis @ Matrix.Diagonal((*scale, 1.0))
+        pb.matrix_basis = basis
+        for path in ("location", "rotation_quaternion", "scale"):
+            pb.keyframe_insert(path, frame=fr)
+
+    piv = Matrix.Translation((0, 0, walk.PIVOT))
+    for i, f in enumerate(PLAN["frames"]):
+        fr = F0 + i
+        sq = f["squash"]
+        W = (Matrix.Translation((f["x"], f["y"], f["z"])) @ Matrix.Rotation(f["yaw"], 4, 'Z')
+             @ Matrix.Translation((f["sway"], 0, 0))
+             @ piv @ Matrix.Rotation(f["pitch"], 4, 'X') @ Matrix.Rotation(f["roll"], 4, 'Y') @ piv.inverted())
+        keyframe(rig.pose.bones["body"], W, fr, scale=(1 / math.sqrt(sq), sq, 1 / math.sqrt(sq)))
+        for (name, sd), (fx, fy, fz, fyaw) in zip(LEGS, f["feet"]):
+            W = (Matrix.Translation((fx, fy, fz)) @ Matrix.Rotation(fyaw, 4, 'Z')
+                 @ Matrix.Translation((-sd * LEG_X, -LEG_Y, 0)))
+            keyframe(rig.pose.bones[name], W, fr)
+
+    # the hurdle: two white posts on little feet and a red bar, square across his path
+    hx, hy, hh = PLAN["hurdle"]
+    M_HURDLE = mat_simple("HurdleWhite", (0.85, 0.85, 0.82), rough=0.35)
+    M_BAR = mat_simple("HurdleRed", (0.75, 0.05, 0.04), rough=0.3, coat=0.5)
+    across = Vector((-math.sin(hh), math.cos(hh), 0))
+    for sd in (-1, 1):
+        base = Vector((hx, hy, 0)) + across * sd * 0.32
+        bpy.ops.mesh.primitive_cylinder_add(radius=0.01, depth=walk.HURDLE_H, location=base + Vector((0, 0, walk.HURDLE_H / 2)))
+        bpy.context.object.data.materials.append(M_HURDLE)
+        bpy.ops.mesh.primitive_cube_add(size=1, location=base + Vector((0, 0, 0.006)), rotation=(0, 0, hh))
+        bpy.context.object.scale = (0.14, 0.03, 0.012)
+        bpy.context.object.data.materials.append(M_HURDLE)
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.012, depth=0.66, location=(hx, hy, walk.HURDLE_H),
+                                        rotation=(math.pi / 2, 0, hh))
+    bpy.context.object.data.materials.append(M_BAR)
+    bpy.ops.object.shade_smooth()
 
 
 # --------------------------------------------------------------------------- set: cyclorama
@@ -313,14 +543,27 @@ def area(name, loc, target, power, size, color=(1, 1, 1), spread=180):
     o = link(bpy.data.objects.new(name, ld))
     o.location = loc
     o.rotation_euler = (Vector(target) - Vector(loc)).to_track_quat('-Z', 'Y').to_euler()
+    o.visible_camera = False      # the back of a big area light shows up as a dark panel
     return o
 
 
-center = (0, 0, height * 0.5)
-area("Key", (-1.4, -1.6, 1.7), center, 70, 1.2, (1.0, 0.95, 0.88), spread=50)
-area("Fill", (1.8, -1.2, 0.6), center, 50, 2.0, (0.85, 0.92, 1.0))
-area("Rim", (0.9, 1.3, 1.3), center, 260, 0.8, (1.0, 0.98, 0.92))   # back light makes him glow
-area("RimL", (-1.0, 1.2, 0.5), center, 120, 0.6, (0.9, 1.0, 0.95))
+if ANIM == "walk":
+    # same rig, pulled back 1.6x around the middle of the course with a wider key, to light the whole run
+    LC, LS = Vector((0.4, 0.1, 0)), 1.6
+else:
+    LC, LS = Vector((0, 0, 0)), 1.0
+center = LC + Vector((0, 0, height * 0.5))
+
+
+def lamp(name, loc, power, size, color, spread=180):
+    area(name, LC + Vector(loc) * LS, center, power * LS * LS, size * LS, color, spread)
+
+
+lamp("Key", (-1.4, -1.6, 1.7), 70 * (2.2 if ANIM == "walk" else 1), 1.2, (1.0, 0.95, 0.88),
+     spread=80 if ANIM == "walk" else 50)
+lamp("Fill", (1.8, -1.2, 0.6), 50, 2.0, (0.85, 0.92, 1.0))
+lamp("Rim", (0.9, 1.3, 1.3), 260, 0.8, (1.0, 0.98, 0.92))   # back light makes him glow
+lamp("RimL", (-1.0, 1.2, 0.5), 120, 0.6, (0.9, 1.0, 0.95))
 
 world = bpy.data.worlds.new("World")
 scene.world = world
@@ -344,6 +587,19 @@ tt.target = aim
 tt.track_axis = 'TRACK_NEGATIVE_Z'
 tt.up_axis = 'UP_Y'
 scene.camera = cam
+if ANIM == "walk":
+    # the aim follows him with operator-style lag; the camera trucks sideways after it, lagging more
+    cam_data.lens = 55
+    cam_data.dof.aperture_fstop = 5.6
+    a = c = None
+    for i, f in enumerate(PLAN["frames"]):
+        want = Vector((f["x"], f["y"], 0.27 + 0.6 * f["z"]))
+        a = want if a is None else a + (want - a) * 0.2
+        cwant = Vector((0.2 + 0.85 * a.x, -3.4, 0.5))
+        c = cwant if c is None else c + (cwant - c) * 0.08
+        aim.location, cam.location = a, c
+        aim.keyframe_insert("location", frame=F0 + i)
+        cam.keyframe_insert("location", frame=F0 + i)
 
 
 # --------------------------------------------------------------------------- render settings
@@ -374,20 +630,6 @@ vs_.view_transform = 'AgX'
 vs_.look = 'AgX - Medium High Contrast'
 vs_.exposure = float(os.environ.get("EXPOSURE", "-0.6"))
 
-# compositor: a soft bloom so the sparkles twinkle
-ng = bpy.data.node_groups.new("Composite", 'CompositorNodeTree')
-ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
-cb = NT(ng)
-rl = cb("CompositorNodeRLayers")
-glare = cb("CompositorNodeGlare")
-glare.inputs["Type"].default_value = 'Bloom'
-glare.inputs["Threshold"].default_value = 1.5
-glare.inputs["Strength"].default_value = 0.4
-glare.inputs["Size"].default_value = 0.45
-gout = cb("NodeGroupOutput")
-cb.link(rl.outputs["Image"], glare.inputs["Image"])
-cb.link(glare.outputs[0], gout.inputs[0])
-scene.compositing_node_group = ng
-
-bpy.ops.wm.save_as_mainfile(filepath=os.path.join(ROOT, "blob.blend"))
-print("SAVED", os.path.join(ROOT, "blob.blend"))
+OUT = os.path.join(ROOT, "blob_walk.blend" if ANIM == "walk" else "blob.blend")
+bpy.ops.wm.save_as_mainfile(filepath=OUT)
+print("SAVED", OUT)

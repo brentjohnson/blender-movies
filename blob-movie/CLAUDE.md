@@ -9,32 +9,61 @@ only what is specific to this movie.
 ## Files
 
 ```
-scripts/build_scene.py   -> blob.blend
-tests/                   look-dev stills (blob_v1..v5, blob_hero)
+scripts/build_scene.py   -> blob.blend (ANIM=walk -> blob_walk.blend)
+scripts/walk.py          walk-test choreography (pure math, imported by build_scene.py)
+tests/                   look-dev stills (blob_v1..v7, blob_hero; v6 = silver flakes, v7 = cylinder legs)
+  preview/               low-res sparkle-drift preview frames (PCT=40 SAMPLES=16 OUT=tests/preview)
+  walk/                  low-res walk-test frames (PCT=50 SAMPLES=16 OUT=tests/walk)
 ```
 
 ## Commands
 
 ```bash
 ./run.sh -b --factory-startup -P scripts/build_scene.py
+ANIM=walk ./run.sh -b --factory-startup -P scripts/build_scene.py                  # walk test
+PCT=50 SAMPLES=16 OUT=tests/walk ./run.sh -b blob_walk.blend -P ../scripts/render_setup.py -a
+FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
 ./run.sh -b blob.blend -P ../scripts/still.py -- 1 $PWD/tests/x.png 50 32
 ./run.sh -b blob.blend -P ../scripts/render_setup.py -a
 ../scripts/encode.sh
 ```
 
-- `build_scene.py` env overrides: `ABSORB` (volume density, 9.0), `SCATTER` (0.8), `GLOW_COUNT` (70),
-  `FLAKE_COUNT` (400), `SAMPLES` (128), `RES_PCT`, `EXPOSURE` (−0.6).
-- No simulations, so there is nothing to bake.
+- `build_scene.py` env overrides: `ANIM` (idle | walk), `ABSORB` (volume density, 9.0), `SCATTER` (0.8), `SKIN_ROUGH` (0.12),
+  `FLAKE_COUNT` (900), `FLAKE_SIZE` (0.004, hex radius), `DRIFT` (0.0125 m/s), `TUMBLE` (0.5 rad/s),
+  `FRAMES` (240 at 24 fps; walk sets its own length), `LEG_R` (0.12), `LEG_X` (0.105), `LEG_Z` (0.03), `LEG_FILLET` (0.35), `FLAKE_ROUGH` (0.04, min of a 0.04–0.16 per-flake spread), `SAMPLES` (128), `RES_PCT`, `EXPOSURE` (−0.6).
+- No Blender simulations, so there is nothing to bake. The flake drift is simulated in `build_scene.py` (~7 s).
 
 ## Scene notes
 
 - **Body.** A metaball field (body + stubby arms/feet melt into one surface), converted to a mesh with
   `bpy.data.meshes.new_from_object(obj.evaluated_get(depsgraph))`. Front faces −Y.
+- **Legs.** Short cylinders with flat soles and soft edges. They start as fat vertical capsule metaballs that merge
+  well into the body (a metaball's visible radius is much smaller than its element radius). After meshing,
+  `flatten_soles()` moves each lower-hemisphere vertex along its ray from the hemisphere centre onto a
+  rounded-cylinder profile (flat sole, fillet = `LEG_FILLET` × leg radius). Thinner/lower capsules gave
+  spindly or pinched legs; the chosen look is `tests/blob_v7_legs.png`.
 - **Material.** A refractive shell around a volume with absorption and scattering (anisotropy 0.3). It needs high
   transmission/transparent bounce limits (12–16), and `volume_step_rate = 0.5` because the body is small.
   Refractive caustics are on, and `blur_glossy = 0.5` keeps them clean.
-- **Sparkles.** Two hair-particle systems inside the body ("glow" and "flakes"). Keep `hair_length = 1`;
-  size them with `particle_size`.
+- **Sparkles.** Weightless silver glitter, like a snow globe with no gravity. `build_scene.py` simulates each
+  hex flake drifting on curl noise (divergence-free, so flakes don't bunch up) and tumbling. Near the skin
+  the outward velocity is cancelled and the flake is pushed in, with a hard stop at `MARGIN`. Eyeballs are
+  spherical obstacles. The result is stored as one point per flake per frame (`frame`, `rot`, `size` attributes)
+  in the "Flakes" mesh. The `FlakeInstances` geometry-nodes tree deletes all points except the current frame's
+  and instances a hex on each. Changing the body, eyes or frame range means rebuilding (the sim reruns).
+  Checked: no flake leaves the body in any frame, and the mean height stays at 0.26 m throughout.
+  Flakes also stay above `FLAKE_FLOOR` (0.12 m), out of the legs, because the legs deform when he walks.
+- **Walk test (`ANIM=walk`).** `walk.py` plans everything per frame: stand, walk a 0.55 m circle at 0.45 m/s,
+  speed up through a 90° turn into a 1.5 m/s run, hop a 0.18 m hurdle (ballistic, 0.22 m lift), and skid to a stop.
+  Gait: phase advances at v/stride. Each foot plants at the body's position at its mid-stance and arcs to the
+  next plant, and the feet settle under him when he's still. The body bobs (vaults when walking, sinks when
+  running), sways toward the stance leg, leans with speed and acceleration, and banks into turns. Squash/stretch
+  is a 4 Hz damped spring kicked at takeoff and landing, giving a jelly wobble.
+  Rig: three parentless bones (`body` pivoting at z=0.06 and `leg.R`/`leg.L` standing on the soles). Leg weights
+  fade into the body by z=0.11, so the jelly stretches between planted feet and the body. Eyes, mouth and
+  flakes are bone-parented to `body`. Keys are baked per frame (`matrix_basis = rest⁻¹ @ W @ rest`).
+  Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
+  Lights: the same rig scaled 1.6× around the course, with a wider key. Lights are hidden from the camera.
 - **Set.** A cyclorama with area lights. Narrowing an area light's `spread` concentrates its power, so lower `energy` to match.
 - **Camera.** 85 mm. Render at 1280×720, CPU, light tree on.
-- **Compositor.** A soft Bloom glare (threshold 1.5, strength 0.4) makes the sparkles twinkle.
+- **Compositor.** None. The bloom glare was removed along with the glowing motes, because sparkles should glint, not glow.

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Encode frames/f_####.png in the current movie dir to H.264 MP4:
-#   ../scripts/encode.sh [output/name.mp4]      (default: output/<movie-dir>.mp4; FPS env, default 24)
+#   ../scripts/encode.sh [output/name.mp4]      (default: output/<movie-dir>.mp4)
+# Env: FPS (default 24), FRAMES_DIR (default frames).
 # Uses libx264 when available; Fedora's ffmpeg-free lacks it, so fall back to libopenh264.
 set -e
 out="${1:-output/$(basename "$PWD").mp4}"
@@ -10,5 +11,5 @@ if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264; then
 else
   codec=(-c:v libopenh264 -b:v 20M -maxrate 30M)
 fi
-ffmpeg -y -framerate "${FPS:-24}" -i frames/f_%04d.png "${codec[@]}" \
+ffmpeg -y -framerate "${FPS:-24}" -i "${FRAMES_DIR:-frames}/f_%04d.png" "${codec[@]}" \
   -pix_fmt yuv420p -movflags +faststart "$out"

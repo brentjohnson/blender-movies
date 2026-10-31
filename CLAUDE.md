@@ -70,8 +70,8 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - `build_scene.py` finds the movie root with `os.path.dirname(os.path.dirname(__file__))`. The shared
   scripts find it from `bpy.data.filepath`.
 - Shared script env knobs: `DEV` (all render scripts; default CPU), `EXPOSURE` and `SUN_ROT` (still.py),
-  `RES=WxH` and `SAMPLES` (render_setup.py; default is to keep the scene's values), `PCT`, `SPP`, `VB` and `VSR` (bench.py),
-  `DOMAIN` (bake.py), `FPS` (encode.sh).
+  `RES=WxH`, `SAMPLES`, `PCT` and `OUT` (render_setup.py; defaults keep the scene's values and write to frames/), `PCT`, `SPP`, `VB` and `VSR` (bench.py),
+  `DOMAIN` (bake.py), `FPS` and `FRAMES_DIR` (encode.sh).
 - Rebuilding the scene invalidates any simulation bake. Re-bake after changes to emitters, domains or animation.
 - Render to PNG frames, not straight to video. The frames survive crashes, and `use_overwrite=False` +
   `use_placeholder=True` make `-a` resumable (and allow several processes to share a frame range).
@@ -88,6 +88,10 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - Keep `build_scene.py` deterministic (`random.seed`) so rebuilds are reproducible.
 - Bake animation per frame from Python (compute the value, `keyframe_insert` every frame) instead of
   editing F-curves. It's simpler, physically exact, and avoids the Blender 5 Action/channelbag API.
+- For many small moving things (hundreds of flakes or motes), simulate them in Python and store one point per
+  item per frame, with an int `frame` attribute, in a single mesh. A geometry-nodes tree then deletes points where
+  `frame != Scene Time` and instances geometry on the rest. That avoids hundreds of keyframed objects, and
+  `build_scene.py` stays deterministic. See blob-movie.
 
 ## Realism learnings
 
@@ -129,7 +133,14 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - Drivers with simple expressions (`frame / 3.0`) work headless without enabling script auto-exec.
 - Hair particles rendered as objects are scaled by `hair_length` × `particle_size`. A tiny hair length
   makes the instances invisible. Keep `hair_length = 1` and control size with `particle_size`.
+- Random rotation for hair instances needs `rotation_mode = 'NOR'` (plus `phase_factor_random`). With
+  `rotation_mode = 'NONE'`, `rotation_factor_random` is ignored and every instance keeps the source's orientation.
 - An area light's `spread` concentrates the same power into a narrower beam. Lower `energy` when you narrow it.
+- Area lights are visible to the camera. Seen from behind, a big one shows up as a dark panel once the camera
+  moves or widens. Set `light_obj.visible_camera = False`.
+- Pose bones without a parent can be keyed from a world transform W applied to their rest geometry:
+  `pb.matrix_basis = bone.matrix_local.inverted() @ W @ bone.matrix_local`. Bone-parenting an object
+  needs `matrix_parent_inverse = (rig.matrix_world @ bone.matrix_local @ Translation((0, bone.length, 0))).inverted()`.
 - Get a mesh from metaballs without operators: `bpy.data.meshes.new_from_object(obj.evaluated_get(depsgraph))`.
 
 ### Geometry and shading
