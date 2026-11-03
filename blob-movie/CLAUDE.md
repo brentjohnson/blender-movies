@@ -153,5 +153,9 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   and flakes are bone-parented to `chest`, and the eyes ride the chest's transform.
   Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
 - **Camera.** 85 mm (55 mm in the walk), f/8 at real scale, which gives a shallow tabletop depth of field.
-  Render at 1280×720, CPU, light tree on.
+  Render at 1280×720, 128 spp, light tree on. Use `../scripts/render.sh blob.blend`: it picks the devices per machine
+  (GPU + CPU processes on the NVIDIA desktop, CPU on the AMD laptop), so don't pass `DEV`.
+- **Timings** (idle shot, every frame costs about the same): NVIDIA desktop 5.8 s/frame GPU, 62 s CPU; with
+  `render.sh` about 5.3 s/frame effective, so the 240 frames take ~21 min. The GPU is ~11× faster here (refractive
+  shell + small volume), unlike the rocket's smoke. Not yet measured on the AMD laptop.
 - **Compositor.** None. The bloom glare was removed along with the glowing motes, because sparkles should glint, not glow.
