@@ -10,16 +10,17 @@ This file covers what all movies share. Each `<name>-movie/CLAUDE.md` adds the n
 ```
 blender-movies/
   CLAUDE.md               this file: shared pipeline, learnings, gotchas, machine notes
-  run.sh                  Blender wrapper (sets OCIO); every movie dir symlinks run.sh -> ../run.sh
+  run.sh                  Blender wrapper (picks the Blender binary, sets OCIO if needed); every movie dir symlinks run.sh -> ../run.sh
   ocio/                   patched OCIO config (see machine notes)
   new_movie.sh            ./new_movie.sh <name>  ->  <name>-movie/ scaffold from template/
   template/               starting CLAUDE.md + build_scene.py for new movies
   scripts/                shared, scene-agnostic tools (run from inside a movie dir)
-    devices.py            Cycles device selection (DEV=CPU|GPU|BOTH), used by the others
+    devices.py            Cycles device selection (DEV=AUTO|CPU|GPU|BOTH), used by the others
     still.py              single test frame
     bench.py              time one frame under a device/quality config
     bake.py               bake all Mantaflow domains (or DOMAIN=<name>) and save
     render_setup.py       final-render settings, resumable PNG frames
+    render.sh             final render with one render_setup.py process per device (GPU + CPU), sharing frames
     encode.sh             frames/ -> output/<movie>.mp4
     grid.py               tile test stills into one contact sheet (PIL)
   <name>-movie/
@@ -44,7 +45,7 @@ scripts/build_scene.py      -> <scene>.blend            (builds the whole scene 
 ../scripts/still.py         -> tests/*.png              (single test frames)
 ../scripts/grid.py          -> tests/grid.png           (contact sheet of stills)
 ../scripts/bench.py         -> timing for device/quality configs
-../scripts/render_setup.py  -> frames/f_####.png        (final render, resumable)
+../scripts/render.sh        -> frames/f_####.png        (final render, resumable; wraps render_setup.py)
 ../scripts/encode.sh        -> output/<movie>.mp4       (ffmpeg H.264)
 ```
 
@@ -58,18 +59,21 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 ../scripts/grid.py tests/grid.png tests/s1.png tests/s60.png tests/s120.png
 # ...iterate, then full quality:
 ./run.sh -b --factory-startup -P scripts/build_scene.py && ./run.sh -b <scene>.blend -P ../scripts/bake.py
-./run.sh -b <scene>.blend -P ../scripts/render_setup.py -a
+../scripts/render.sh <scene>.blend        # or: ./run.sh -b <scene>.blend -P ../scripts/render_setup.py -a
 ../scripts/encode.sh
 ```
 
-- Always launch Blender through `./run.sh` (it sets machine-specific env such as `OCIO`). Any
-  step that saves the .blend without it can silently reset color management. See the
+- Always launch Blender through `./run.sh`. It picks the Blender binary (`$BLENDER`, else the newest
+  official build in `~/.local/opt/blender-*/`, else the system `blender`) and sets `OCIO` when that binary is
+  Fedora's. Any step that saves the .blend without it can silently reset color management. See the
   machine notes below.
 - `build_scene.py` scripts should read env overrides for quality knobs (sim resolution, samples,
   resolution percentage, lighting tweaks), so drafts and finals come from the same script.
 - `build_scene.py` finds the movie root with `os.path.dirname(os.path.dirname(__file__))`. The shared
   scripts find it from `bpy.data.filepath`.
-- Shared script env knobs: `DEV` (all render scripts; default CPU), `EXPOSURE` and `SUN_ROT` (still.py),
+- Shared script env knobs: `BLENDER` (run.sh), `DEV` (all render scripts; default AUTO = NVIDIA GPU via OptiX/CUDA if
+  present, else CPU), `GPU_API` (force OPTIX/CUDA/HIP/... for DEV=GPU|BOTH), `PROCS` (render.sh; default
+  "GPU CPU" with an NVIDIA GPU, else "CPU"), `EXPOSURE` and `SUN_ROT` (still.py),
   `RES=WxH`, `SAMPLES`, `PCT` and `OUT` (render_setup.py; defaults keep the scene's values and write to frames/), `PCT`, `SPP`, `VB` and `VSR` (bench.py),
   `DOMAIN` (bake.py), `FPS` and `FRAMES_DIR` (encode.sh).
 - Rebuilding the scene invalidates any simulation bake. Re-bake after changes to emitters, domains or animation.
@@ -163,10 +167,12 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 
 ## Machine-specific notes
 
-Add a section per machine. Record anything that changes how scripts must run or how fast they are, and
-update `run.sh` / `scripts/devices.py` defaults to match the machine you're on.
+Add a section per machine. Record anything that changes how scripts must run or how fast they are.
+`run.sh`, `devices.py`, `render.sh` and `encode.sh` detect the hardware, so the same defaults work on every
+machine below. Extend the detection rather than hard-coding one machine's defaults.
+Both machines so far have the hostname `fedora`; tell them apart by CPU/GPU (`lscpu`, `nvidia-smi -L`).
 
-### `fedora` (hostname): Fedora 44, AMD Ryzen AI 7 PRO 350 (8C/16T) + Radeon 860M iGPU, 30 GB RAM
+### AMD laptop (hostname `fedora`): Fedora 44, AMD Ryzen AI 7 PRO 350 (8C/16T) + Radeon 860M iGPU, 30 GB RAM
 - Install everything the project needs:
   ```bash
   sudo dnf install blender ffmpeg-free python3 python3-pillow git gh
@@ -179,9 +185,41 @@ update `run.sh` / `scripts/devices.py` defaults to match the machine you're on.
   `ocio_profile_version: 2.4` and the 2.5-only `interop_id:` / `interchange:` blocks removed.
   `run.sh` exports `OCIO` to point at it. Re-create the copy if Blender is upgraded.
 - **Render on the CPU, not the iGPU.** Benchmark: CPU 8.6 s, CPU+HIP 34.6 s, HIP alone
-  147 s. The 860M slows down even mixed rendering, so `devices.py` defaults to `DEV=CPU`.
+  147 s. The 860M slows down even mixed rendering, so `DEV=AUTO` never picks HIP and renders on the CPU here.
 - Reference timings (Cycles CPU, 1280×720, 40 samples, OIDN, outdoor scene with sky, haze and smoke):
   ~24 s/frame for clear frames, up to ~61 s/frame when smoke fills the frame. Smoke bake at res 160 + noise ≈ 3.5 min.
 - Fedora's `ffmpeg-free` has no `libx264`. `encode.sh` falls back to `libopenh264` (still H.264, plays anywhere).
   For better compression, install ffmpeg from RPM Fusion.
 - Claude Code's safety check blocks `rm` with globs after `cd`. Use absolute paths, or clean up manually.
+
+### NVIDIA desktop (hostname `fedora`): Fedora 44, Intel i7-14700F (20C = 8P+12E / 28T) + GeForce RTX 4070 SUPER (12 GB), 15 GB RAM
+- Same Fedora packages as above (`blender ffmpeg-free python3 python3-pillow git gh`). NVIDIA driver 615.71 from
+  RPM Fusion (`akmod-nvidia`, `xorg-x11-drv-nvidia-cuda`) provides `libcuda` and `libnvoptix`.
+- **Fedora's Blender can't use the GPU:** it is built without CUDA/OptiX (only HIP). Install the official
+  build next to it; `run.sh` picks it up automatically:
+  ```bash
+  mkdir -p ~/.local/opt && cd ~/.local/opt
+  curl -LO https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz   # check the .sha256 next to it
+  tar -xJf blender-5.2.2-linux-x64.tar.xz && rm blender-5.2.2-linux-x64.tar.xz
+  ```
+  It bundles OCIO 2.5, so it needs no patched config (AgX works out of the box), and it renders the same images as
+  Fedora's 5.2.2. Keep its version in step with Fedora's. `BLENDER=/usr/bin/blender ./run.sh ...` forces the system one.
+- **Benchmarks** (rocket scene, ~1280×720, 40 spp, OIDN; blob at 1280×720, 128 spp):
+
+  | frame | GPU (OptiX) | CPU+GPU, one process | CPU |
+  |---|---|---|---|
+  | rocket f1, clear | **4.1 s** | 4.3 s | 12.7 s |
+  | rocket f120, smoke rising | **26.2 s** | 36.3 s | 29.4 s |
+  | rocket f200, smoke fills frame | 57.9 s | **26.6 s** | 31.3 s |
+  | blob f120 | **6.3 s** | 6.8 s | 67.1 s |
+
+  CUDA is about the same as OptiX here. The official build's CPU speed matches Fedora's (12.7 vs 13.6 s).
+- **The GPU is slow on heavy Mantaflow volumes.** At rocket f200 the GPU spends 53 s of 58 s path tracing.
+  This isn't sync/upload. Otherwise it is 3–10× faster than the CPU, so `DEV=AUTO` picks the GPU.
+- **Render with one GPU and one CPU process at once** (`../scripts/render.sh`). They don't slow each other down
+  (f200 ran at 58.4 s GPU + 32.6 s CPU concurrently, about 3.3 GB RAM each), which gives about 21 s/frame on the
+  heaviest smoke frames and about 3 s on clear ones. CPU+GPU in *one* process (`DEV=BOTH`) is inconsistent; avoid it.
+- **RAM is the tight resource (15 GB).** A rocket render process peaks at about 3.3 GB, and the res-160 smoke bake at 2 GB.
+- Smoke bake at res 160 + noise: 2.4 min (1.7 GB cache). Scene builds: rocket 2 s, blob 7 s.
+- `ffmpeg-free` has `h264_nvenc`; `encode.sh` uses it (CQ 16, preset p7) before falling back to `libopenh264`.
+- `gh` is not logged in (`gh auth login` if needed); git pushes over SSH as `brentjohnson`.

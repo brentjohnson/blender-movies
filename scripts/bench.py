@@ -1,5 +1,5 @@
 """Time one frame under a device/quality config:
-   DEV=CPU PCT=30 SPP=16 VB=2 VSR=2 ./run.sh -b <scene>.blend -P ../scripts/bench.py -- FRAME OUT"""
+   DEV=AUTO PCT=30 SPP=16 VB=2 VSR=2 ./run.sh -b <scene>.blend -P ../scripts/bench.py -- FRAME OUT"""
 import bpy, sys, time, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import devices

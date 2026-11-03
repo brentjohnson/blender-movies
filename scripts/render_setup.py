@@ -1,5 +1,5 @@
 """Final render settings, applied at render time (not saved):
-   [RES=1280x720] [SAMPLES=40] [DEV=CPU] ./run.sh -b <scene>.blend -P ../scripts/render_setup.py -a
+   [RES=1280x720] [SAMPLES=40] [DEV=AUTO] ./run.sh -b <scene>.blend -P ../scripts/render_setup.py -a
 Without RES/SAMPLES the scene's own values are kept. Writes <movie>/frames/f_####.png.
 Previews: PCT=40 renders at a fraction of RES; OUT=tests/preview writes there instead of frames/.
 Resumable: existing frames are skipped, and several processes can share a frame range."""

@@ -24,10 +24,10 @@ tests/                   look-dev stills (blob_v1..v8, blob_hero; v6 = silver fl
 ```bash
 ./run.sh -b --factory-startup -P scripts/build_scene.py
 ANIM=walk ./run.sh -b --factory-startup -P scripts/build_scene.py                  # walk test
-PCT=50 SAMPLES=16 OUT=tests/walk ./run.sh -b blob_walk.blend -P ../scripts/render_setup.py -a
+PCT=50 SAMPLES=16 OUT=tests/walk ../scripts/render.sh blob_walk.blend
 FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
 ./run.sh -b blob.blend -P ../scripts/still.py -- 1 $PWD/tests/x.png 50 32
-./run.sh -b blob.blend -P ../scripts/render_setup.py -a
+../scripts/render.sh blob.blend
 ../scripts/encode.sh
 ```
 

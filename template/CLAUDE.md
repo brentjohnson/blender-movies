@@ -16,7 +16,7 @@ scripts/build_scene.py   -> __NAME__.blend
 ```bash
 ./run.sh -b --factory-startup -P scripts/build_scene.py
 ./run.sh -b __NAME__.blend -P ../scripts/still.py -- 1 $PWD/tests/t1.png 50 16
-./run.sh -b __NAME__.blend -P ../scripts/render_setup.py -a
+../scripts/render.sh __NAME__.blend
 ../scripts/encode.sh
 ```
 

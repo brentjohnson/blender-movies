@@ -23,7 +23,7 @@ SMOKE_RES=64 SMOKE_NOISE=0 ./run.sh -b --factory-startup -P scripts/build_scene.
 ./run.sh -b rocket_launch.blend -P ../scripts/still.py -- <frame> $PWD/tests/x.png <pct> <samples>
 # ...iterate, then full-res:
 ./run.sh -b --factory-startup -P scripts/build_scene.py && ./run.sh -b rocket_launch.blend -P ../scripts/bake.py
-RES=1280x720 SAMPLES=40 ./run.sh -b rocket_launch.blend -P ../scripts/render_setup.py -a
+RES=1280x720 SAMPLES=40 ../scripts/render.sh rocket_launch.blend
 ../scripts/encode.sh output/rocket_launch_test.mp4
 ```
 
@@ -48,4 +48,5 @@ RES=1280x720 SAMPLES=40 ./run.sh -b rocket_launch.blend -P ../scripts/render_set
   - Separate emitters at the flame-trench exits give the classic sideways ground billows.
 - **Engine light.** A point light at about 7e5 W. Brighter lights up the whole haze volume.
 - **Timings.** ~24 s/frame before ignition, rising to ~61 s/frame as the smoke spreads (1280×720, 40 spp, CPU).
-  The full 240 frames took about 3 h.
+  The full 240 frames took about 3 h on the AMD laptop. On the NVIDIA desktop GPU and CPU are about equal on smoke
+  frames, and `render.sh` (one process each) gives about 21 s/frame at the heaviest.
