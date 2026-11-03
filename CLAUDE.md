@@ -163,6 +163,12 @@ Add a section per machine. Record anything that changes how scripts must run or 
 update `run.sh` / `scripts/devices.py` defaults to match the machine you're on.
 
 ### `fedora` (hostname): Fedora 44, AMD Ryzen AI 7 PRO 350 (8C/16T) + Radeon 860M iGPU, 30 GB RAM
+- Install everything the project needs:
+  ```bash
+  sudo dnf install blender ffmpeg-free python3 python3-pillow git gh
+  ```
+  `blender` runs every step, `ffmpeg-free` is used by `encode.sh`, `python3-pillow` by `grid.py`,
+  and `git`/`gh` for version control and GitHub. After installing or upgrading Blender, check the OCIO note below.
 - Blender 5.2.2 LTS from Fedora packages (`/usr/bin/blender`), ffmpeg at `/usr/bin/ffmpeg`, Python 3 with PIL.
 - **Broken OCIO out of the box.** Fedora ships OpenColorIO 2.4, but Blender 5.2's config is version 2.5,
   so Blender falls back to "Standard" only (no AgX/Filmic). Fix: `ocio/config.ocio` is a copy with
