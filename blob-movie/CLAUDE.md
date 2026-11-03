@@ -4,6 +4,10 @@ A cute green blob character, 12 cm tall, on a kitchen counter (marble top, subwa
 everyday clutter). The body is a refractive jelly with a green absorbing/scattering volume inside and
 sparkles suspended in it.
 
+**The movie is the `ANIM=walk` build (`blob_walk.blend`, 574 frames ≈ 24 s).** He stands for 5 s, walks a circle,
+runs and hops onto a rolling pin, rides it, falls off, splats, loses his eyes and gets them back. The default
+build (`ANIM=idle`, `blob.blend`) is only the 10 s standing look-dev shot: render it for look tests, not as the film.
+
 Shared pipeline, scripts, learnings and machine notes are in `../CLAUDE.md`. This file holds
 only what is specific to this movie.
 
@@ -22,13 +26,15 @@ tests/                   look-dev stills (blob_v1..v8, blob_hero; v6 = silver fl
 ## Commands
 
 ```bash
-./run.sh -b --factory-startup -P scripts/build_scene.py
-ANIM=walk ./run.sh -b --factory-startup -P scripts/build_scene.py                  # walk test
-PCT=50 SAMPLES=16 OUT=tests/walk ../scripts/render.sh blob_walk.blend
+# the movie
+ANIM=walk ./run.sh -b --factory-startup -P scripts/build_scene.py                  # -> blob_walk.blend
+PCT=50 SAMPLES=16 OUT=tests/walk ../scripts/render.sh blob_walk.blend               # quick low-res preview
 FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
+../scripts/render.sh blob_walk.blend                                                # final -> frames/ (empty it first)
+../scripts/encode.sh                                                                # -> output/blob-movie.mp4
+# idle look-dev shot
+./run.sh -b --factory-startup -P scripts/build_scene.py                              # -> blob.blend
 ./run.sh -b blob.blend -P ../scripts/still.py -- 1 $PWD/tests/x.png 50 32
-../scripts/render.sh blob.blend
-../scripts/encode.sh
 ```
 
 - `build_scene.py` env overrides: `ANIM` (idle | walk), `BLOB_H` (0.12, his real height in m), `ABSORB` (volume density per design meter, 11.0), `GREEN_SHADOW` (1), `SHADOW_TINT` (1.5), `SCATTER` (1.2), `SKIN_ROUGH` (0.2),
@@ -153,9 +159,11 @@ FRAMES_DIR=tests/walk ../scripts/encode.sh output/blob_walk_test.mp4
   and flakes are bone-parented to `chest`, and the eyes ride the chest's transform.
   Camera: 55 mm, aim lags him (0.2/frame, rising with the hop), and the camera trucks sideways (0.08/frame).
 - **Camera.** 85 mm (55 mm in the walk), f/8 at real scale, which gives a shallow tabletop depth of field.
-  Render at 1280×720, 128 spp, light tree on. Use `../scripts/render.sh blob.blend`: it picks the devices per machine
-  (GPU + CPU processes on the NVIDIA desktop, CPU on the AMD laptop), so don't pass `DEV`.
-- **Timings** (idle shot, every frame costs about the same): NVIDIA desktop 5.8 s/frame GPU, 62 s CPU; with
-  `render.sh` about 5.3 s/frame effective, so the 240 frames take ~21 min. The GPU is ~11× faster here (refractive
-  shell + small volume), unlike the rocket's smoke. Not yet measured on the AMD laptop.
+  Render at 1280×720, 128 spp, light tree on. Use `../scripts/render.sh blob_walk.blend`: it picks the device per machine
+  (GPU on the NVIDIA desktop, CPU on the AMD laptop), so don't pass `DEV` or `PROCS`.
+- **Timings** (NVIDIA desktop, final 1280×720 / 128 spp): the movie runs 5.1–5.7 s/frame on the GPU across
+  the whole shot (sampled at frames 60–540), so the 574 frames take ~52 min. The idle shot is 5.6–5.8 s/frame GPU
+  and 62 s CPU, so its 240 frames take ~23 min. The GPU is ~11× faster here (refractive shell + small volume), unlike the rocket's
+  smoke. Don't add a CPU process (`PROCS="GPU CPU"`): it starved the GPU one (11.5 s/frame) and the pair ran at
+  ~10 s/frame. Not yet measured on the AMD laptop.
 - **Compositor.** None. The bloom glare was removed along with the glowing motes, because sparkles should glint, not glow.

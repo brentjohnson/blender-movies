@@ -20,7 +20,7 @@ blender-movies/
     bench.py              time one frame under a device/quality config
     bake.py               bake all Mantaflow domains (or DOMAIN=<name>) and save
     render_setup.py       final-render settings, resumable PNG frames
-    render.sh             final render with one render_setup.py process per device (GPU + CPU), sharing frames
+    render.sh             final render: one render_setup.py process per device in PROCS, sharing frames
     encode.sh             frames/ -> output/<movie>.mp4
     grid.py               tile test stills into one contact sheet (PIL)
   <name>-movie/
@@ -72,8 +72,8 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - `build_scene.py` finds the movie root with `os.path.dirname(os.path.dirname(__file__))`. The shared
   scripts find it from `bpy.data.filepath`.
 - Shared script env knobs: `BLENDER` (run.sh), `DEV` (all render scripts; default AUTO = NVIDIA GPU via OptiX/CUDA if
-  present, else CPU), `GPU_API` (force OPTIX/CUDA/HIP/... for DEV=GPU|BOTH), `PROCS` (render.sh; default
-  "GPU CPU" with an NVIDIA GPU, else "CPU"), `EXPOSURE` and `SUN_ROT` (still.py),
+  present, else CPU), `GPU_API` (force OPTIX/CUDA/HIP/... for DEV=GPU|BOTH), `PROCS` (render.sh; default "GPU";
+  "GPU CPU" adds a CPU process for GPU-slow scenes; without an NVIDIA GPU it's ignored and one CPU process runs), `EXPOSURE` and `SUN_ROT` (still.py),
   `RES=WxH`, `SAMPLES`, `PCT` and `OUT` (render_setup.py; defaults keep the scene's values and write to frames/), `PCT`, `SPP`, `VB` and `VSR` (bench.py),
   `DOMAIN` (bake.py), `FPS` and `FRAMES_DIR` (encode.sh).
 - Rebuilding the scene invalidates any simulation bake. Re-bake after changes to emitters, domains or animation.
@@ -216,9 +216,14 @@ Both machines so far have the hostname `fedora`; tell them apart by CPU/GPU (`ls
   CUDA is about the same as OptiX here. The official build's CPU speed matches Fedora's (12.7 vs 13.6 s).
 - **The GPU is slow on heavy Mantaflow volumes.** At rocket f200 the GPU spends 53 s of 58 s path tracing.
   This isn't sync/upload. Otherwise it is 3–10× faster than the CPU, so `DEV=AUTO` picks the GPU.
-- **Render with one GPU and one CPU process at once** (`../scripts/render.sh`). They don't slow each other down
-  (f200 ran at 58.4 s GPU + 32.6 s CPU concurrently, about 3.3 GB RAM each), which gives about 21 s/frame on the
-  heaviest smoke frames and about 3 s on clear ones. CPU+GPU in *one* process (`DEV=BOTH`) is inconsistent; avoid it.
+- **A second, CPU render process helps only when the GPU is the bottleneck.** `render.sh` defaults to one GPU process.
+  - On rocket smoke frames the GPU process is busy path tracing, so a parallel CPU process (`PROCS="GPU CPU"`)
+    costs it nothing: f200 ran at 58.4 s GPU + 32.6 s CPU concurrently, about 3.3 GB RAM each. That's about
+    21 s/frame effective.
+  - In GPU-friendly scenes the GPU process needs several CPU cores each frame (scene sync, denoise). A CPU process
+    using all 28 threads starves it. Blob went from 5.8 to 11.5 s/frame on the GPU, ~10 s/frame combined, which is
+    slower than the GPU alone.
+  - CPU+GPU in *one* process (`DEV=BOTH`) is inconsistent; avoid it.
 - **RAM is the tight resource (15 GB).** A rocket render process peaks at about 3.3 GB, and the res-160 smoke bake at 2 GB.
 - Smoke bake at res 160 + noise: 2.4 min (1.7 GB cache). Scene builds: rocket 2 s, blob 7 s.
 - `ffmpeg-free` has `h264_nvenc`; `encode.sh` uses it (CQ 16, preset p7) before falling back to `libopenh264`.
