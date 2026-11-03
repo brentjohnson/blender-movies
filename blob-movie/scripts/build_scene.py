@@ -1,12 +1,14 @@
-"""Build the green blob character in a simple studio set.
+"""Build the green blob character on a kitchen counter.
 
 Run:  ./run.sh -b --factory-startup -P scripts/build_scene.py
 Saves blob.blend in the project root. ANIM=walk builds the walk test instead (scripts/walk.py) and saves
-blob_walk.blend: he walks a circle, runs, hops a hurdle and skids to a stop.
+blob_walk.blend: he walks a circle, runs, hops onto a rolling pin, rides it, and gets thrown.
 
 The body is a metaball field (body + stubby arms/feet melt into one surface), converted to a mesh.
 It's a refractive shell around a green absorbing/scattering volume, with sparkles suspended inside.
-Front of the character faces -Y. Units are meters; he's about 0.55 m tall.
+Front of the character faces -Y. He's built and animated in design units (about 0.58 tall); everything that
+belongs to him (body, rig, eyes, flakes, rolling pin, camera) hangs off the "Character" empty, which scales him
+to BLOB_H (12 cm). The kitchen (scripts/kitchen.py) is in real meters, countertop at z = 0.
 """
 import bpy
 import bmesh
@@ -19,6 +21,7 @@ from mathutils import Vector, Quaternion, Matrix
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import walk  # noqa: E402
+import kitchen  # noqa: E402
 
 ANIM = os.environ.get("ANIM", "idle")      # idle: standing hero pose; walk: walk/run/hop test
 random.seed(11)
@@ -97,7 +100,7 @@ def mat_body():
     # Surface: clear jelly skin. The green comes mostly from the volume, so thick parts read deeper.
     surf = n("ShaderNodeBsdfPrincipled", **{"Base Color": (0.82, 1.0, 0.8, 1),
                                             "Transmission Weight": 1.0,
-                                            "Roughness": float(os.environ.get("SKIN_ROUGH", "0.12")),
+                                            "Roughness": float(os.environ.get("SKIN_ROUGH", "0.2")),
                                             "IOR": 1.36})
     if os.environ.get("GREEN_SHADOW", "1") == "1":
         # Cycles can't find light paths through refracting jelly from soft lights, so the floor gets a plain
@@ -111,7 +114,7 @@ def mat_body():
                          n.math('MINIMUM', lp.outputs["Transparent Depth"], 1.0))
         # The skin tints the light too (once in, once out), on top of the volume's absorption, so the
         # green survives AgX and the grey fill on the floor.
-        tint = float(os.environ.get("SHADOW_TINT", "1.0"))
+        tint = float(os.environ.get("SHADOW_TINT", "1.5"))
         clear = n("ShaderNodeBsdfTransparent", Color=(1 - 0.6 * tint, 1 - 0.05 * tint, 1 - 0.65 * tint, 1))
         mix = n("ShaderNodeMixShader", Factor=n.math('MULTIPLY', lp.outputs["Is Shadow Ray"], outside))
         n.link(surf.outputs[0], mix.inputs[1])
@@ -123,7 +126,7 @@ def mat_body():
     absorb = n("ShaderNodeVolumeAbsorption", Color=(*BODY_GREEN, 1),
                Density=float(os.environ.get("ABSORB", "11.0")))
     scat = n("ShaderNodeVolumeScatter", Color=(0.55, 1.0, 0.5, 1),
-             Density=float(os.environ.get("SCATTER", "0.8")), Anisotropy=0.3)
+             Density=float(os.environ.get("SCATTER", "1.2")), Anisotropy=0.3)
     add = n("ShaderNodeAddShader")
     n.link(absorb.outputs[0], add.inputs[0])
     n.link(scat.outputs[0], add.inputs[1])
@@ -294,6 +297,14 @@ sm.iterations = 6
 sm.use_only_smooth = True
 height = max(v.co.z for v in me.vertices)
 print("BLOB HEIGHT", round(height, 3))
+# Real size. Everything of his is built in design units and scaled by the Character empty. Volume densities
+# are per world meter, so they go up by 1/SCALE to keep the same look.
+BLOB_H = float(os.environ.get("BLOB_H", "0.12"))
+SCALE = BLOB_H / height
+ROOT_XY = (0.0, -0.03)          # where his design origin sits on the counter
+for nd in M_BODY.node_tree.nodes:
+    if nd.bl_idname in ("ShaderNodeVolumeAbsorption", "ShaderNodeVolumeScatter"):
+        nd.inputs["Density"].default_value /= SCALE
 
 
 # --------------------------------------------------------------------------- face
@@ -366,7 +377,7 @@ else:
 F0, F1 = scene.frame_start, scene.frame_end
 
 FLAKE_COUNT = int(os.environ.get("FLAKE_COUNT", "900"))
-FLAKE_SIZE = float(os.environ.get("FLAKE_SIZE", "0.004"))      # hex radius, m
+FLAKE_SIZE = float(os.environ.get("FLAKE_SIZE", "0.0055"))      # hex radius, m
 DRIFT = float(os.environ.get("DRIFT", "0.0125"))               # typical drift speed, m/s
 TUMBLE = float(os.environ.get("TUMBLE", "0.5"))                # typical spin, rad/s
 SWIRL_SCALE = 0.12                                             # size of the flow's eddies, m
@@ -571,7 +582,8 @@ if ANIM == "walk":
     # moves to H*(a*u + b*u^2), with a + b = HEAD_SQUASH. Its local vertical compression a + 2*b*u is strongest at
     # the floor, and it spreads out from the contact point by 1/sqrt(compression) to keep its volume. The floor
     # slice puddles out (~2.9x) and the far end stays domed (~1.35x). Controlled by the "Smoosh" empty:
-    # location = contact point, scale.x - 1 = amount (0..1), scale.y = H.
+    # location = contact point, scale.x - 1 = amount (0..1), scale.y = H. It's a child of the Character
+    # empty, so in world space the floor is the countertop (z = 0) and every length is SCALEd.
     SM_A = 0.12
     SM_B = walk.HEAD_SQUASH - SM_A
     smoosh_ctrl = link(bpy.data.objects.new("Smoosh", None))
@@ -588,7 +600,7 @@ if ANIM == "walk":
     p_ = g("ShaderNodeSeparateXYZ", Vector=wp.outputs[0])
     c_ = g("ShaderNodeSeparateXYZ", Vector=ctl.outputs["Location"])
     k_ = g("ShaderNodeSeparateXYZ", Vector=ctl.outputs["Scale"])
-    amount = g.math('SUBTRACT', k_.outputs["X"], 1.0)
+    amount = g.math('SUBTRACT', g.math('DIVIDE', k_.outputs["X"], k_.outputs["Z"]), 1.0)   # world scale is SCALE*(1+amount, H, 1)
     H = k_.outputs["Y"]
     u = g.math('DIVIDE', p_.outputs["Z"], H, clamp=True)
     f = g.math('MULTIPLY', g.math('MULTIPLY', g.math('MULTIPLY_ADD', u, SM_B, SM_A), u), H)   # H*u*(a + b*u)
@@ -635,7 +647,7 @@ if ANIM == "walk":
     body_probe = [v.co.copy() for v in list(me.vertices)[::6]
                   if any(g.group == body_gi and g.weight > 0.98 for g in v.groups)]
     piv = Matrix.Translation((0, 0, walk.PIVOT))
-    hold = None
+    hold = {}
     body_M = []                                 # chest bone's world transform per frame, for the eyes
 
     def key_upper(M, f, fr):
@@ -688,11 +700,11 @@ if ANIM == "walk":
         body_M.append(key_upper(M, f, fr))
         for name, sd in LEGS:
             ML = M @ Matrix.Translation((0, 0, f["tuck"]))
-            if name == "leg.R" and f["hold_w"] > 0:  # the foot that clipped the bar lags behind
+            if f["hold_w"] > 0:                     # the feet get dragged back with the pin, then come free
                 sole = ML @ Vector((sd * LEG_X, LEG_Y, 0))
-                if hold is None:
-                    hold = sole.copy()
-                ML = Matrix.Translation((hold - sole) * f["hold_w"]) @ ML
+                if name not in hold:
+                    hold[name] = sole.copy()
+                ML = Matrix.Translation((hold[name] - sole) * f["hold_w"]) @ ML
             keyframe(rig.pose.bones[name], ML, fr)
 
     # The eyes. They ride the body until the head splat, then pop out, bounce and roll to a stop. A while
@@ -734,11 +746,6 @@ if ANIM == "walk":
         eye.rotation_mode = 'QUATERNION'
         i_eject, i_ret, i_abs, i_flt, i_pop, i_done = (int(round(tm[n] * fps)) for n in
                                                       ("t_eject", "t_return", "t_absorb", "t_float", "t_pop", "t_done"))
-        # where it touches his base, in body (rest) coordinates: front of the base, just off centre
-        front_y = min(v.co.y for v in me.vertices
-                      if abs(v.co.x - side * 0.07) < 0.025 and abs(v.co.z - R_EYE) < 0.025)
-        L_touch = Vector((side * 0.07, front_y - R_EYE * 0.6, R_EYE))
-        L_in = Vector((side * 0.06, front_y + 0.09, 0.09))
         out_dir = Vector((e_loc.x * 0.6, -1.0, 0.15)).normalized()
         L_sock = e_loc - out_dir * 0.06             # just behind the socket, inside him
 
@@ -773,6 +780,25 @@ if ANIM == "walk":
                 else:
                     q = Quaternion(spin.normalized(), spin.length * dt) @ q
         p_rest, q = free[i_ret]
+        # It goes back in through the leg nearest to where it stopped, from that side (body rest coordinates).
+        # If both eyes pick the same leg, the second comes in a little round from the first.
+        pl = body_M[i_abs].inverted() @ p_rest
+        leg_d = [abs(pl.x - sd * LEG_X) + abs(pl.y - LEG_Y) for sd in (-1, 1)]
+        leg_i = 0 if leg_d[0] < leg_d[1] else 1
+        axis = Vector(((-1, 1)[leg_i] * LEG_X, LEG_Y, 0.0))
+        out_l = Vector((pl.x - axis.x, pl.y - axis.y, 0.0))
+        out_l = out_l.normalized() if out_l.length > 1e-6 else Vector((0, -1, 0))
+        if k == 1 and leg_i == first_leg:
+            turn = 0.7 if out_l.cross(first_out).z < 0 else -0.7
+            out_l = Matrix.Rotation(turn, 3, 'Z') @ out_l
+        if k == 0:
+            first_leg, first_out = leg_i, out_l.copy()
+        o_ = axis + out_l * 0.6 + Vector((0, 0, R_EYE))
+        hit, _, _, _ = bvh.ray_cast(o_, -out_l)
+        hit = hit if hit is not None else axis + out_l * 0.13 + Vector((0, 0, R_EYE))
+        L_touch = hit + out_l * R_EYE * 0.6
+        L_touch.z = R_EYE
+        L_in = axis + Vector((0, 0, 0.08))
 
         prev = None
         for i in range(nF):
@@ -780,14 +806,16 @@ if ANIM == "walk":
             scale = e_scale
             if i < i_eject or i >= i_done:          # in his head
                 loc, rq, scale = (M @ rest).decompose()
+                scale = scale.copy()
+                scale.z *= walk.blink(i / fps)          # blinks: the eye (and its pupil) squash flat
             elif i <= i_ret:
                 loc, rq = free[i]
             elif i < i_abs:                         # rolling back to him
                 T = M @ L_touch
                 T.z = R_EYE
-                fwd = rot_of(M) @ Vector((0, -1, 0))
-                fwd.z = 0
-                P1 = T + fwd.normalized() * 0.3
+                out_w = rot_of(M) @ out_l              # approach from that side of the leg
+                out_w.z = 0
+                P1 = T + out_w.normalized() * 0.3
                 P1.z = R_EYE
                 s0 = ease((i - 1 - i_ret) / (i_abs - i_ret))
                 s1 = ease((i - i_ret) / (i_abs - i_ret))
@@ -819,65 +847,64 @@ if ANIM == "walk":
             for path in ("location", "rotation_quaternion", "scale"):
                 eye.keyframe_insert(path, frame=F0 + i)
 
-    # the hurdle: two white posts on little feet and a red bar, square across his path. It hangs from an
-    # empty on the front edge of its feet, so when he clips it, it rocks forward and rattles back down.
-    hx, hy, hh = PLAN["hurdle"]
-    fwd = Vector((math.cos(hh), math.sin(hh), 0))
-    across = Vector((-math.sin(hh), math.cos(hh), 0))
-    rocker = link(bpy.data.objects.new("Hurdle", None))
-    rocker.location = Vector((hx, hy, 0)) + fwd * 0.07
-    rocker.rotation_euler = (0, 0, hh)
-    M_HURDLE = mat_simple("HurdleWhite", (0.85, 0.85, 0.82), rough=0.35)
-    M_BAR = mat_simple("HurdleRed", (0.75, 0.05, 0.04), rough=0.3, coat=0.5)
-    parts = []
-    for sd in (-1, 1):
-        base = Vector((hx, hy, 0)) + across * sd * 0.32
-        bpy.ops.mesh.primitive_cylinder_add(radius=0.01, depth=walk.HURDLE_H, location=base + Vector((0, 0, walk.HURDLE_H / 2)))
-        bpy.context.object.data.materials.append(M_HURDLE)
-        parts.append(bpy.context.object)
-        bpy.ops.mesh.primitive_cube_add(size=1, location=base + Vector((0, 0, 0.006)), rotation=(0, 0, hh))
-        bpy.context.object.scale = (0.14, 0.03, 0.012)
-        bpy.context.object.data.materials.append(M_HURDLE)
-        parts.append(bpy.context.object)
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.012, depth=0.66, location=(hx, hy, walk.HURDLE_H),
-                                        rotation=(math.pi / 2, 0, hh))
-    bpy.context.object.data.materials.append(M_BAR)
-    bpy.ops.object.shade_smooth()
-    parts.append(bpy.context.object)
-    bpy.context.view_layer.update()
-    for o in parts:
-        o.parent = rocker
-        o.matrix_parent_inverse = rocker.matrix_world.inverted()
-    for i in range(len(PLAN["frames"])):
-        tau = (F0 + i - 1) / scene.render.fps - PLAN["t_clip"]
-        tip = 0.0 if tau < 0 else math.radians(22) * math.exp(-tau / 0.22) * abs(math.sin(2 * math.pi * 2.2 * tau))
-        rocker.rotation_euler = (0, tip, hh)
-        rocker.keyframe_insert("rotation_euler", frame=F0 + i)
+    # the rolling pin: maple, one lathe along its axis (handles, collars, barrel with eased edges). It lies
+    # across his path; it rolls (angle = distance / radius) as the planner moves it.
+    R_, L_, hr, hl = walk.PIN_R, walk.PIN_LEN, walk.HANDLE_R, walk.HANDLE_LEN
+    e_ = 0.012
+    prof = [(0.0, -L_ / 2 - hl - hr * 0.3), (hr * 0.9, -L_ / 2 - hl - hr * 0.15), (hr * 1.08, -L_ / 2 - hl + 0.04),
+            (hr, -L_ / 2 - hl * 0.5), (hr * 0.82, -L_ / 2 - 0.04), (hr * 0.9, -L_ / 2 - 0.012), (R_ - e_, -L_ / 2),
+            (R_, -L_ / 2 + e_)]
+    prof += [(r_, -z_) for r_, z_ in reversed(prof)]
+    M_PIN = kitchen.mat_wood(material, "PinMaple", (0.72, 0.52, 0.32), (0.60, 0.40, 0.22), scale=2.5,
+                             rough=0.5, coat=0.0, grain=(1.0, 0.1, 1.0))
+    pin_obj = kitchen._lathe("RollingPin", prof, M_PIN, segs=64, axis='Y')
+    link(pin_obj)
+    pin_obj.rotation_mode = 'XYZ'
+    for i, (px, py, ang) in enumerate(PLAN["pin"]):
+        pin_obj.location = (px, py, R_)
+        pin_obj.rotation_euler = (0, ang, PLAN["pin_h"])
+        pin_obj.keyframe_insert("location", frame=F0 + i)
+        pin_obj.keyframe_insert("rotation_euler", frame=F0 + i)
 
 
-# --------------------------------------------------------------------------- set: cyclorama
-cyc = bpy.data.meshes.new("Cyclorama")
-prof = [(y, 0.0) for y in (-6, -2, 0.5)]
-R = 1.5
-for i in range(1, 13):
-    a = i / 12 * math.pi / 2
-    prof.append((0.5 + R * math.sin(a), R - R * math.cos(a)))
-prof.append((0.5 + R, 5.0))
-W = 6.0
-verts = [(x, y, z) for (y, z) in prof for x in (-W, W)]
-faces = [(2 * i, 2 * i + 1, 2 * i + 3, 2 * i + 2) for i in range(len(prof) - 1)]
-cyc.from_pydata(verts, [], faces)
-for p in cyc.polygons:
-    p.use_smooth = True
-cyc.materials.append(M_BACKDROP)
-link(bpy.data.objects.new("Cyclorama", cyc))
+# --------------------------------------------------------------------------- scale him onto the counter
+char = link(bpy.data.objects.new("Character", None))
+char.location = (*ROOT_XY, 0.0)
+char.scale = (SCALE, SCALE, SCALE)
+for o in list(scene.objects):
+    if o.parent is None and o is not char:
+        o.parent = char                         # identity parent inverse: his values stay in design units
 
 
-# --------------------------------------------------------------------------- lights
-def area(name, loc, target, power, size, color=(1, 1, 1), spread=180):
+def to_world(p):
+    return char.matrix_world @ Vector(p)
+
+
+bpy.context.view_layer.update()
+_course = []
+if ANIM == "walk":
+    _course = [to_world((f["x"], f["y"], 0)) for f in PLAN["frames"]] + [to_world((q[0], q[1], 0)) for q in PLAN["pin"]]
+else:
+    _course = [to_world((0, 0, 0))]
+REACH = 0.32 * SCALE + 0.02                     # his half-width plus a little room
+
+
+def keep_clear(x, y, r):
+    return all((c.x - x) ** 2 + (c.y - y) ** 2 > (r + REACH) ** 2 for c in _course[::3])
+
+
+kitchen.build(link, material, mat_simple, keep_clear)
+
+
+# --------------------------------------------------------------------------- lights (real meters)
+def area(name, loc, target, power, size, color=(1, 1, 1), spread=180, size_y=None):
     ld = bpy.data.lights.new(name, 'AREA')
     ld.energy = power
-    ld.size = size
+    if size_y:
+        ld.shape = 'RECTANGLE'
+        ld.size, ld.size_y = size, size_y
+    else:
+        ld.size = size
     ld.spread = math.radians(spread)
     ld.color = color
     o = link(bpy.data.objects.new(name, ld))
@@ -887,55 +914,60 @@ def area(name, loc, target, power, size, color=(1, 1, 1), spread=180):
     return o
 
 
-if ANIM == "walk":
-    # same rig, pulled back 1.6x around the middle of the course with a wider key, to light the whole run
-    LC, LS = Vector((0.4, 0.1, 0)), 1.6
-else:
-    LC, LS = Vector((0, 0, 0)), 1.0
-center = LC + Vector((0, 0, height * 0.5))
+LK = float(os.environ.get("LIGHT", "0.3"))
+mid = Vector((0.15 if ANIM == "walk" else 0.0, 0.0, 0.05))
+# daylight from a window on the left wall, a little in front of the counter
+area("Window", (kitchen.X0 + 0.05, -0.55, 0.55), mid, 260 * LK, 1.1, (0.88, 0.93, 1.0), size_y=0.9)
+# soft ceiling light over the room, behind the camera
+area("Ceiling", (0.3, -1.4, 1.5), mid, 110 * LK, 1.2, (1.0, 0.92, 0.80))
+# Under-cabinet puck lights: small warm spots under the uppers, behind him. They throw short crisp shadows
+# toward the camera, where the light that comes through him shows up green on the marble.
+PUCK_W = float(os.environ.get("PUCK_W", "60"))
+for i, x in enumerate((-0.75, -0.15, 0.45, 1.05, 1.65)):
+    sd = bpy.data.lights.new("Puck", 'SPOT')
+    sd.energy = PUCK_W * LK
+    sd.shadow_soft_size = 0.012
+    sd.spot_size = math.radians(120)
+    sd.spot_blend = 0.6
+    sd.color = (1.0, 0.86, 0.68)
+    pk = link(bpy.data.objects.new("Puck", sd))
+    pk.location = (x, kitchen.BACK - 0.08, kitchen.TILE_TOP - 0.005)
+    pk.rotation_euler = (math.radians(-12), 0, 0)  # aimed down, tipped a little toward the front
+    pk.visible_camera = False
 
-
-def lamp(name, loc, power, size, color, spread=180):
-    area(name, LC + Vector(loc) * LS, center, power * LS * LS, size * LS, color, spread)
-
-
-lamp("Key", (-1.4, -1.6, 1.7), 70 * (2.2 if ANIM == "walk" else 1), 1.2, (1.0, 0.95, 0.88),
-     spread=80 if ANIM == "walk" else 50)
-lamp("Fill", (1.8, -1.2, 0.6), 50, 2.0, (0.85, 0.92, 1.0))
-lamp("Rim", (0.9, 1.3, 1.3), 260, 0.8, (1.0, 0.98, 0.92))   # back light makes him glow
-lamp("RimL", (-1.0, 1.2, 0.5), 120, 0.6, (0.9, 1.0, 0.95))
-
-# Hard back light, high behind him: throws a crisp shadow toward the camera, where the light that
-# comes through him shows up green on the floor.
-BACK_W = float(os.environ.get("BACK_W", "1500"))
-sd = bpy.data.lights.new("Back", 'SPOT')
-sd.energy = BACK_W * LS * LS
-sd.shadow_soft_size = 0.04
-sd.spot_size = math.radians(70 if ANIM == "walk" else 40)
-sd.spot_blend = 0.4
-sd.color = (1.0, 0.97, 0.9)
-back = link(bpy.data.objects.new("Back", sd))
-back.location = LC + Vector((0.35, 1.4, 1.5)) * LS
-back.rotation_euler = (center - back.location).to_track_quat('-Z', 'Y').to_euler()
-back.visible_camera = False
+# Late-afternoon sun through the window in the left wall: low and raking along the counter, so he throws a
+# long shadow across the marble, and the light that comes through him paints it green.
+SUN_W = float(os.environ.get("SUN_W", "18"))
+SUN_EL = math.radians(float(os.environ.get("SUN_EL", "21")))
+SUN_AZ = math.radians(float(os.environ.get("SUN_AZ", "6")))     # + swings the beam toward the backsplash
+sun_d = bpy.data.lights.new("Sun", 'SUN')
+sun_d.energy = SUN_W
+sun_d.angle = math.radians(1.2)
+sun_d.color = (1.0, 0.86, 0.66)
+sun = link(bpy.data.objects.new("Sun", sun_d))
+beam = Vector((math.cos(SUN_EL) * math.cos(SUN_AZ), math.cos(SUN_EL) * math.sin(SUN_AZ), -math.sin(SUN_EL)))
+sun.rotation_euler = beam.to_track_quat('-Z', 'Y').to_euler()
 
 world = bpy.data.worlds.new("World")
 scene.world = world
 world.use_nodes = True
-world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.05, 0.05, 0.06, 1)
-world.node_tree.nodes["Background"].inputs["Strength"].default_value = 1.0
+world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.55, 0.52, 0.48, 1)
+world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.15
 
 
-# --------------------------------------------------------------------------- camera
-aim = link(bpy.data.objects.new("CamAim", None))
+# --------------------------------------------------------------------------- camera (design units, under Character)
+aim = bpy.data.objects.new("CamAim", None)
 aim.location = (0, 0, height * 0.48)
 cam_data = bpy.data.cameras.new("Camera")
 cam_data.lens = 85
 cam_data.dof.use_dof = True
 cam_data.dof.focus_object = aim
-cam_data.dof.aperture_fstop = 4.0
-cam = link(bpy.data.objects.new("Camera", cam_data))
+cam_data.dof.aperture_fstop = float(os.environ.get("FSTOP", "8.0"))
+cam = bpy.data.objects.new("Camera", cam_data)
 cam.location = (0.85, -2.9, 0.42)
+for o in (aim, cam):
+    link(o)
+    o.parent = char
 tt = cam.constraints.new('TRACK_TO')
 tt.target = aim
 tt.track_axis = 'TRACK_NEGATIVE_Z'
@@ -947,14 +979,25 @@ if ANIM == "walk":
     # looking back at his face (3/4 front); the aim moves up to his face. (Interpolating an orbit angle here
     # spun the camera a full 360: his heading has accumulated 2*pi from the walk circle.)
     cam_data.lens = 55
-    cam_data.dof.aperture_fstop = 5.6
     fps = scene.render.fps
+    CAM_AHEAD = float(os.environ.get("CAM_AHEAD", "2.6"))   # design m ahead of him / out to the side, run-up to fall
+    CAM_SIDE = float(os.environ.get("CAM_SIDE", "2.5"))
+
+    def smooth_(e0, e1, x):
+        x = min(max((x - e0) / (e1 - e0), 0.0), 1.0)
+        return x * x * (3 - 2 * x)
     t_orbit = PLAN["t_feet"] + walk.CAM_DELAY
     end = PLAN["frames"][-1]
     hub = Vector((end["x"], end["y"], 0.0))
     face = hub + Vector((0, 0, 0.36))
     heading = end["yaw"] - math.pi / 2
     ahead = Vector((math.cos(heading), math.sin(heading), 0))
+    # For the run-up, the pin ride and the fall, the camera swings round to a 3/4 front view ahead of him
+    # along the run line, so his arms (which swing about his left-right axis) read.
+    h_run = PLAN["pin_h"]
+    u_run = Vector((math.cos(h_run), math.sin(h_run), 0))
+    perp = Vector((math.sin(h_run), -math.cos(h_run), 0))          # the camera's side of the run line
+    t_front = PLAN["t_takeoff"]
     a = c = None
     orbit0 = None
     for i, f in enumerate(PLAN["frames"]):
@@ -962,8 +1005,23 @@ if ANIM == "walk":
         want = Vector((f["x"], f["y"], 0.27 + 0.6 * f["z"]))
         a = want if a is None else a + (want - a) * 0.2
         cwant = Vector((0.2 + 0.85 * a.x, -3.4, 0.5))
+        w = smooth_(t_front - 2.4, t_front - 0.9, t)
+        if w > 0:
+            front = Vector((a.x, a.y, 0)) + u_run * CAM_AHEAD + perp * CAM_SIDE
+            front.z = 0.6                                            # a bit higher, to see his shadow on the counter
+            cwant = cwant.lerp(front, w)
         c = cwant if c is None else c + (cwant - c) * 0.08
         aim_loc, cam_loc = a, c
+        # Opening: hold close on him while he stands, pushing in slowly, so the drifting sparkles read. As he
+        # starts walking, ease back out to the tracking camera.
+        w_open = 1 - smooth_(walk.STAND_BEFORE - 0.2, walk.STAND_BEFORE + 1.6, t)
+        if w_open > 0:
+            f0 = PLAN["frames"][0]
+            hub0 = Vector((f0["x"], f0["y"], 0.0))
+            close = hub0 + Vector((0.45, -1.0, 0.0)) * (2.0 - 0.35 * smooth_(0.0, walk.STAND_BEFORE, t))
+            close.z = 0.34
+            cam_loc = c.lerp(close, w_open)
+            aim_loc = a.lerp(hub0 + Vector((0, 0, 0.29)), w_open)
         if t >= t_orbit:
             if orbit0 is None:
                 c_end = hub + ahead * 2.2 + (c - hub - ahead * (c - hub).dot(ahead)) * 0.8
@@ -1012,7 +1070,7 @@ c.use_light_tree = True
 vs_ = scene.view_settings
 vs_.view_transform = 'AgX'
 vs_.look = 'AgX - Medium High Contrast'
-vs_.exposure = float(os.environ.get("EXPOSURE", "-0.6"))
+vs_.exposure = float(os.environ.get("EXPOSURE", "-1.6"))
 
 OUT = os.path.join(ROOT, "blob_walk.blend" if ANIM == "walk" else "blob.blend")
 bpy.ops.wm.save_as_mainfile(filepath=OUT)
