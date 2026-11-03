@@ -76,6 +76,10 @@ for f in 1 60 120; do ./run.sh -b <scene>.blend -P ../scripts/still.py -- $f $PW
 - Render to PNG frames, not straight to video. The frames survive crashes, and `use_overwrite=False` +
   `use_placeholder=True` make `-a` resumable (and allow several processes to share a frame range).
 
+## Git
+
+- Commit directly to `main`. Only create a branch when specifically asked to.
+
 ## Workflow learnings
 
 - **Iterate on stills, not animations.** Render 3–4 key frames (start, peak action, late)
